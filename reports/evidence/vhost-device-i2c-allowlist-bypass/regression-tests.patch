@@ -1,0 +1,188 @@
+diff --git a/vhost-device-i2c/src/i2c.rs b/vhost-device-i2c/src/i2c.rs
+index b105262..21b39a9 100644
+--- a/vhost-device-i2c/src/i2c.rs
++++ b/vhost-device-i2c/src/i2c.rs
+@@ -616,11 +616,21 @@ impl<D: I2cDevice> I2cMap<D> {
+ 
+ #[cfg(test)]
+ pub(crate) mod tests {
++    use std::cell::Cell;
++
+     use vmm_sys_util::tempfile::TempFile;
+ 
+     use super::*;
+     use crate::DeviceConfig;
+ 
++    // Per-test-thread counters prove that a rejected request batch is stopped
++    // before the backend selects an adapter or submits an I2C transfer.
++    thread_local! {
++        pub static RDWR_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
++        pub static RDWR_MESSAGE_COUNT: Cell<usize> = const { Cell::new(0) };
++        pub static SLAVE_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
++    }
++
+     // Update read-buffer of each write-buffer with index + 1 value.
+     pub fn update_rdwr_buf(buf: &mut [u8]) {
+         for (i, byte) in buf.iter_mut().enumerate() {
+@@ -684,7 +694,11 @@ pub(crate) mod tests {
+         }
+ 
+         fn rdwr(&self, reqs: &mut [I2cReq]) -> Result<()> {
++            RDWR_CALL_COUNT.with(|count| count.set(count.get() + 1));
++
+             for req in reqs {
++                RDWR_MESSAGE_COUNT.with(|count| count.set(count.get() + 1));
++
+                 if req.len == 0 {
+                     return Err(Error::I2cTransferInvalid(0));
+                 }
+@@ -708,6 +722,7 @@ pub(crate) mod tests {
+         }
+ 
+         fn slave(&self, _addr: u64) -> Result<()> {
++            SLAVE_CALL_COUNT.with(|count| count.set(count.get() + 1));
+             self.slave_result
+         }
+ 
+@@ -1113,9 +1128,10 @@ pub(crate) mod tests {
+                 len: 2,
+                 buf: [3, 4].to_vec(),
+             },
+-            // Will cause failure
++            // Keep the address configured so this exercises the invalid
++            // SMBus request count rather than the address allowlist.
+             I2cReq {
+-                addr: 0,
++                addr: 0x3,
+                 flags: 0,
+                 len: 0,
+                 buf: [0].to_vec(),
+diff --git a/vhost-device-i2c/src/vhu_i2c.rs b/vhost-device-i2c/src/vhu_i2c.rs
+index df04462..25b5033 100644
+--- a/vhost-device-i2c/src/vhu_i2c.rs
++++ b/vhost-device-i2c/src/vhu_i2c.rs
+@@ -378,7 +378,10 @@ mod tests {
+ 
+     use super::{Error, *};
+     use crate::{
+-        i2c::tests::{update_rdwr_buf, verify_rdwr_buf, DummyDevice},
++        i2c::tests::{
++            update_rdwr_buf, verify_rdwr_buf, DummyDevice, RDWR_CALL_COUNT, RDWR_MESSAGE_COUNT,
++            SLAVE_CALL_COUNT,
++        },
+         AdapterConfig,
+     };
+ 
+@@ -500,6 +503,112 @@ mod tests {
+         }
+     }
+ 
++    // Build two real VirtIO-I2C descriptor chains and submit them together
++    // through the production process_requests() path. The counters are reset
++    // after I2cMap::new(), which selects configured addresses during setup.
++    fn run_two_message_allowlist_case(
++        device_config: &str,
++        addresses: [u16; 2],
++    ) -> (Vec<u8>, usize, usize, usize) {
++        let device_config = AdapterConfig::try_from(device_config).unwrap();
++        let i2c_map = I2cMap::<DummyDevice>::new(&device_config).unwrap();
++        let backend = VhostUserI2cBackend::new(Arc::new(i2c_map)).unwrap();
++        let mem = GuestMemoryAtomic::new(
++            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap(),
++        );
++        let vring = VringRwLock::new(mem, QUEUE_SIZE as u16).unwrap();
++
++        // FAIL_NEXT is set on every non-final message in this batch.
++        const FAIL_NEXT: u32 = 1;
++        let mut first_buf = vec![0];
++        let first = prepare_desc_chain(GuestAddress(0), &mut first_buf, FAIL_NEXT, addresses[0]);
++        let mut second_buf = vec![0];
++        let second = prepare_desc_chain(GuestAddress(0), &mut second_buf, 0, addresses[1]);
++        let requests = vec![first, second];
++
++        RDWR_CALL_COUNT.with(|count| count.set(0));
++        RDWR_MESSAGE_COUNT.with(|count| count.set(0));
++        SLAVE_CALL_COUNT.with(|count| count.set(0));
++
++        backend.process_requests(requests.clone(), &vring).unwrap();
++
++        let statuses = requests
++            .iter()
++            .map(|desc_chain| {
++                let descriptors: Vec<_> = desc_chain.clone().collect();
++                desc_chain
++                    .memory()
++                    .read_obj::<VirtioI2cInHdr>(descriptors[descriptors.len() - 1].addr())
++                    .unwrap()
++                    .status
++            })
++            .collect();
++
++        let slave_calls = SLAVE_CALL_COUNT.with(|count| count.get());
++        let rdwr_calls = RDWR_CALL_COUNT.with(|count| count.get());
++        let rdwr_messages = RDWR_MESSAGE_COUNT.with(|count| count.get());
++
++        eprintln!(
++            "I2C_ALLOWLIST_REGRESSION addresses={addresses:02x?} statuses={statuses:?} slave_calls={slave_calls} rdwr_calls={rdwr_calls} rdwr_messages={rdwr_messages}"
++        );
++
++        (statuses, slave_calls, rdwr_calls, rdwr_messages)
++    }
++
++    #[test]
++    fn process_requests_allowlist_rejects_mixed_addresses_before_adapter_access() {
++        // The first address is permitted, but the second is not configured.
++        let (statuses, slave_calls, rdwr_calls, rdwr_messages) =
++            run_two_message_allowlist_case("1:4", [0x04, 0x55]);
++
++        assert_eq!(statuses, vec![VIRTIO_I2C_MSG_ERR; 2]);
++        assert_eq!(
++            slave_calls, 0,
++            "must reject before I2C_SLAVE / adapter selection"
++        );
++        assert_eq!(rdwr_calls, 0, "must reject before I2C_RDWR");
++        assert_eq!(rdwr_messages, 0, "no message may reach the adapter");
++    }
++
++    #[test]
++    fn process_requests_allowlist_rejects_unconfigured_first_address_before_adapter_access() {
++        // Reversing the messages must still reject the batch. The permitted
++        // second address must not make the unconfigured first address valid.
++        let (statuses, slave_calls, rdwr_calls, rdwr_messages) =
++            run_two_message_allowlist_case("1:4", [0x55, 0x04]);
++
++        assert_eq!(statuses, vec![VIRTIO_I2C_MSG_ERR; 2]);
++        assert_eq!(slave_calls, 0, "must reject before adapter selection");
++        assert_eq!(rdwr_calls, 0, "must reject before I2C_RDWR");
++        assert_eq!(rdwr_messages, 0, "no message may reach the adapter");
++    }
++
++    #[test]
++    fn process_requests_allowlist_accepts_all_permitted_addresses() {
++        // A valid two-message transfer to the same configured slave must work.
++        let (statuses, slave_calls, rdwr_calls, rdwr_messages) =
++            run_two_message_allowlist_case("1:4:5", [0x04, 0x05]);
++
++        assert_eq!(statuses, vec![VIRTIO_I2C_MSG_OK; 2]);
++        assert_eq!(slave_calls, 1);
++        assert_eq!(rdwr_calls, 1, "the complete batch is one adapter transfer");
++        assert_eq!(rdwr_messages, 2);
++    }
++
++    #[test]
++    fn process_requests_allowlist_rejects_addresses_mapped_to_different_adapters() {
++        // Both addresses are configured, but they belong to different host
++        // adapters. One I2C_RDWR batch must not be routed through only the
++        // adapter selected by its first message.
++        let (statuses, slave_calls, rdwr_calls, rdwr_messages) =
++            run_two_message_allowlist_case("1:4,2:32", [0x04, 0x20]);
++
++        assert_eq!(statuses, vec![VIRTIO_I2C_MSG_ERR; 2]);
++        assert_eq!(slave_calls, 0, "must reject before adapter selection");
++        assert_eq!(rdwr_calls, 0, "must reject before I2C_RDWR");
++        assert_eq!(rdwr_messages, 0, "no message may reach either adapter");
++    }
++
+     // Prepares list of dummy descriptors, their content isn't significant
+     fn prepare_desc_chain_dummy(
+         addr: Option<Vec<u64>>,
