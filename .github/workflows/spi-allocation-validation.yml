@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/spi-allocation-validation.yml"
       - "tests/spi-allocation-order.patch"
+      - "tests/spi-vhost-user-socket.patch"
 
 permissions:
   contents: read
@@ -64,6 +65,9 @@ jobs:
           git apply ../tests/spi-allocation-order.patch
           git diff --check
           git diff -- vhost-device-spi/src/vhu_spi.rs > ../artifacts/spi-allocation-order-test.diff
+          git apply --check ../tests/spi-vhost-user-socket.patch
+          git apply ../tests/spi-vhost-user-socket.patch
+          git diff --check
 
       - name: Run bounded allocation-order reproduction
         working-directory: upstream
@@ -74,6 +78,7 @@ jobs:
             timeout 180s cargo test --locked -p vhost-device-spi process_requests_allocates_guest_sized_buffers_before_param_validation -- --nocapture
             timeout 180s cargo test --locked -p vhost-device-spi spi_guest_batch_requests_scale_allocation -- --nocapture
             timeout 180s cargo test --locked -p vhost-device-spi spi_guest_backends_overlap_allocations -- --nocapture
+            timeout 180s cargo test --locked -p vhost-device-spi real_vhost_user_socket_request_allocates_guest_sized_spi_buffers -- --nocapture
           } 2>&1 | tee ../artifacts/spi-allocation-repro.log
 
       - name: Upload validation logs
