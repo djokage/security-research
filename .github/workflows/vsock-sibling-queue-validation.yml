@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           timeout 240s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets test_sibling_queue_via_guest_tx_vring -- --nocapture 2>&1 | tee ../artifacts/vsock-guest-tx-repro.log
           timeout 240s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets test_sibling_raw_packets_accumulate_without_receiver_drain -- --nocapture 2>&1 | tee ../artifacts/vsock-queue-repro.log
+          timeout 240s cargo test --locked -p vhost-device-vsock --no-default-features --test vsock_vhost_user_integration -- --nocapture 2>&1 | tee ../artifacts/vsock-vhost-user-e2e.log
           timeout 300s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets 2>&1 | tee ../artifacts/vsock-full-tests.log
 
       - name: Upload test logs
