@@ -28,8 +28,8 @@ diff --git a/vhost-device-spi/src/vhu_spi.rs b/vhost-device-spi/src/vhu_spi.rs
 +
 +        let trans_header_addr = 0x10_0000;
 +        let tx_buf_addr = 0x20_0000;
-+        let rx_buf_addr = 0x30_0000;
-+        let result_addr = 0x60_0000;
++        let rx_buf_addr = 0x30_00000;
++        let result_addr = 0x60_00000;
 +
 +        let descs = [
 +            SplitDescriptor::new(
