@@ -1,107 +1,280 @@
 diff --git a/vhost-device-spi/src/vhu_spi.rs b/vhost-device-spi/src/vhu_spi.rs
 --- a/vhost-device-spi/src/vhu_spi.rs
 +++ b/vhost-device-spi/src/vhu_spi.rs
-@@ -1475,5 +1475,103 @@
+@@ -1475,5 +1475,275 @@
          // Hit the non-loop part
          backend.set_event_idx(false);
          backend.handle_event(0, EventSet::IN, &[vring], 0).unwrap();
      }
 +    #[test]
-+    fn process_requests_allocates_guest_sized_buffers_before_param_validation() {
-+        // Keep this reproduction bounded: two 32 MiB buffers (64 MiB total).
-+        const TRANSFER_LEN: u32 = 32 * 1024 * 1024;
++    fn spi_guest_batch_requests_scale_allocation() {
++        const TRANSFER_LEN: u32 = 16 * 1024 * 1024;
++        const REQUESTS: u64 = 4;
 +
-+        fn vm_peak_kib() -> u64 {
++        fn vm_metric_kib(name: &str) -> u64 {
 +            let status = std::fs::read_to_string("/proc/self/status")
 +                .expect("reading Linux process status");
 +            status
 +                .lines()
-+                .find(|line| line.starts_with("VmPeak:"))
++                .find(|line| line.starts_with(name))
 +                .and_then(|line| line.split_whitespace().nth(1))
 +                .and_then(|value| value.parse::<u64>().ok())
-+                .expect("parsing VmPeak from /proc/self/status")
++                .unwrap_or_else(|| panic!("missing {name} in /proc/self/status"))
 +        }
 +
 +        let spi_dummy_ctrl =
 +            SpiController::new(DummyDevice::open(&PathBuf::from("spidev0.0")).unwrap()).unwrap();
 +        let mut backend = VhostUserSpiBackend::new(Arc::new(spi_dummy_ctrl)).unwrap();
 +
-+        let trans_header_addr = 0x10_0000;
-+        let tx_buf_addr = 0x20_0000;
-+        let rx_buf_addr = 0x30_00000;
-+        let result_addr = 0x60_00000;
-+
-+        let descs = [
-+            SplitDescriptor::new(
-+                trans_header_addr,
++        let mut descs = Vec::new();
++        let mut result_addrs = Vec::new();
++        let mut headers = Vec::new();
++        for idx in 0..REQUESTS {
++            let header_addr = 0x10_0000 + idx * 0x1000;
++            let tx_addr = 0x20_0000 + idx * 0x10_00000;
++            let rx_addr = 0x80_00000 + idx * 0x10_00000;
++            let result_addr = 0xf00_0000 + idx * 0x1000;
++            headers.push(header_addr);
++            result_addrs.push(result_addr);
++            descs.push(SplitDescriptor::new(
++                header_addr,
 +                size_of::<VirtioSpiTransferHead>() as u32,
 +                VRING_DESC_F_NEXT as u16,
 +                0,
-+            ),
-+            SplitDescriptor::new(tx_buf_addr, TRANSFER_LEN, VRING_DESC_F_NEXT as u16, 0),
-+            SplitDescriptor::new(
-+                rx_buf_addr,
++            ));
++            descs.push(SplitDescriptor::new(
++                tx_addr,
++                TRANSFER_LEN,
++                VRING_DESC_F_NEXT as u16,
++                0,
++            ));
++            descs.push(SplitDescriptor::new(
++                rx_addr,
 +                TRANSFER_LEN,
 +                (VRING_DESC_F_NEXT | VRING_DESC_F_WRITE) as u16,
 +                0,
-+            ),
-+            SplitDescriptor::new(
++            ));
++            descs.push(SplitDescriptor::new(
 +                result_addr,
 +                size_of::<VirtioSpiTransferResult>() as u32,
 +                VRING_DESC_F_WRITE as u16,
 +                0,
-+            ),
-+        ];
++            ));
++        }
 +
 +        let (vring, mem) = setup_descs(&descs);
-+
-+        // tx_nbits=2 is rejected by check_trans_params(). The descriptor
-+        // lengths are nevertheless consumed to size TX/RX buffers first.
-+        let out_hdr = VirtioSpiTransferHead {
-+            chip_select_id: 0,
-+            bits_per_word: 8,
-+            cs_change: 0,
-+            tx_nbits: 2,
-+            rx_nbits: 1,
-+            reserved1: 0,
-+            reserved2: 0,
-+            reserved3: 0,
-+            mode: From::from(0),
-+            freq: From::from(10000),
-+            word_delay_ns: From::from(0),
-+            cs_setup_ns: From::from(0),
-+            cs_delay_hold_ns: From::from(0),
-+            cs_change_delay_inactive_ns: From::from(0),
-+        };
-+        mem.memory()
-+            .write_obj(out_hdr, GuestAddress(trans_header_addr))
-+            .expect("writing transfer header");
++        for header_addr in headers {
++            let out_hdr = VirtioSpiTransferHead {
++                chip_select_id: 0,
++                bits_per_word: 8,
++                cs_change: 0,
++                tx_nbits: 2,
++                rx_nbits: 1,
++                reserved1: 0,
++                reserved2: 0,
++                reserved3: 0,
++                mode: From::from(0),
++                freq: From::from(10000),
++                word_delay_ns: From::from(0),
++                cs_setup_ns: From::from(0),
++                cs_delay_hold_ns: From::from(0),
++                cs_change_delay_inactive_ns: From::from(0),
++            };
++            mem.memory()
++                .write_obj(out_hdr, GuestAddress(header_addr))
++                .expect("writing transfer header");
++        }
 +
 +        backend.update_memory(mem.clone()).unwrap();
-+
-+        // Take the baseline after queue and guest-memory setup so the
-+        // measured high-water increase comes from processing this request.
-+        let peak_before = vm_peak_kib();
++        let peak_before = vm_metric_kib("VmPeak:");
++        let hwm_before = vm_metric_kib("VmHWM:");
 +        backend.process_queue(&vring).unwrap();
-+        let peak_after = vm_peak_kib();
-+        let peak_delta_kib = peak_after.saturating_sub(peak_before);
-+        let minimum_expected_kib = (2 * TRANSFER_LEN as u64 * 3 / 4) / 1024;
++        let peak_delta_kib = vm_metric_kib("VmPeak:").saturating_sub(peak_before);
++        let hwm_delta_kib = vm_metric_kib("VmHWM:").saturating_sub(hwm_before);
++        let expected_bytes = REQUESTS * 2 * TRANSFER_LEN as u64;
++        let minimum_expected_kib = (expected_bytes * 3 / 4) / 1024;
 +
 +        eprintln!(
-+            "SPI allocation-order repro: transfer_len={} bytes; expected two buffers={} bytes; VmPeak delta={} KiB",
-+            TRANSFER_LEN,
-+            2 * TRANSFER_LEN as u64,
-+            peak_delta_kib
++            "SPI batch repro: requests={REQUESTS}; transfer_len={} bytes; expected TX+RX allocation={} bytes; VmPeak delta={} KiB; VmHWM delta={} KiB",
++            TRANSFER_LEN, expected_bytes, peak_delta_kib, hwm_delta_kib
 +        );
-+
 +        assert!(
 +            peak_delta_kib >= minimum_expected_kib,
-+            "expected VmPeak to grow by at least {minimum_expected_kib} KiB for two guest-sized buffers; observed {peak_delta_kib} KiB"
++            "expected VmPeak to grow by at least {minimum_expected_kib} KiB; observed {peak_delta_kib} KiB"
 +        );
-+        validate_trans_result(
-+            mem,
-+            result_addr,
-+            ResponseStatus::ParamErr as u8,
-+        );
++        for result_addr in result_addrs {
++            validate_trans_result(mem.clone(), result_addr, ResponseStatus::ParamErr as u8);
++        }
 +    }
++
++    #[derive(Debug)]
++    struct BarrierDevice {
++        inner: DummyDevice,
++        barrier: Arc<std::sync::Barrier>,
++    }
++
++    impl SpiDevice for BarrierDevice {
++        fn open(path: &std::path::Path) -> std::result::Result<Self, crate::spi::Error> {
++            Ok(Self {
++                inner: DummyDevice::open(path)?,
++                barrier: Arc::new(std::sync::Barrier::new(2)),
++            })
++        }
++
++        fn max_speed_hz(&self) -> std::result::Result<u32, crate::spi::Error> {
++            self.inner.max_speed_hz()
++        }
++
++        fn set_max_speed_hz(&self, value: u32) -> std::result::Result<(), crate::spi::Error> {
++            self.inner.set_max_speed_hz(value)
++        }
++
++        fn bits_per_word(&self) -> std::result::Result<u8, crate::spi::Error> {
++            self.inner.bits_per_word()
++        }
++
++        fn set_bits_per_word(&self, value: u8) -> std::result::Result<(), crate::spi::Error> {
++            self.inner.set_bits_per_word(value)
++        }
++
++        fn mode(&self) -> std::result::Result<u32, crate::spi::Error> {
++            self.inner.mode()
++        }
++
++        fn set_mode(&self, value: u32) -> std::result::Result<(), crate::spi::Error> {
++            self.inner.set_mode(value)
++        }
++
++        fn rdwr(
++            &self,
++            reqs: &mut [crate::linux_spi::SpiIocTransfer],
++        ) -> std::result::Result<(), crate::spi::Error> {
++            // Touch each RX page, then wait until both independently-created
++            // backend instances have reached the transfer call. Their request
++            // vectors therefore remain live at the same time.
++            for req in reqs {
++                assert_ne!(req.rx_buf, 0);
++                let rx = req.rx_buf as *mut u8;
++                for offset in (0..req.len as usize).step_by(4096) {
++                    // SAFETY: rx_buf is a live allocation owned by the
++                    // VhostUserSpiBackend request currently being processed.
++                    unsafe { rx.add(offset).write_volatile(0x5a) };
++                }
++            }
++            self.barrier.wait();
++            Ok(())
++        }
++
++        fn detect_supported_features(
++            &self,
++        ) -> std::result::Result<VirtioSpiConfig, crate::spi::Error> {
++            self.inner.detect_supported_features()
++        }
++    }
++
++    #[test]
++    fn spi_guest_backends_overlap_allocations() {
++        const TRANSFER_LEN: u32 = 32 * 1024 * 1024;
++
++        fn vm_hwm_kib() -> u64 {
++            let status = std::fs::read_to_string("/proc/self/status")
++                .expect("reading Linux process status");
++            status
++                .lines()
++                .find(|line| line.starts_with("VmHWM:"))
++                .and_then(|line| line.split_whitespace().nth(1))
++                .and_then(|value| value.parse::<u64>().ok())
++                .expect("parsing VmHWM from /proc/self/status")
++        }
++
++        fn make_context(
++            barrier: Arc<std::sync::Barrier>,
++        ) -> (
++            VhostUserSpiBackend<BarrierDevice>,
++            VringRwLock,
++            GuestMemoryAtomic<GuestMemoryMmap>,
++        ) {
++            let device = BarrierDevice {
++                inner: DummyDevice::open(&PathBuf::from("spidev0.0")).unwrap(),
++                barrier,
++            };
++            let controller = SpiController::new(device).unwrap();
++            let mut backend = VhostUserSpiBackend::new(Arc::new(controller)).unwrap();
++
++            let header_addr = 0x10_0000;
++            let tx_addr = 0x20_0000;
++            let rx_addr = 0x30_00000;
++            let result_addr = 0x60_00000;
++            let descs = [
++                SplitDescriptor::new(
++                    header_addr,
++                    size_of::<VirtioSpiTransferHead>() as u32,
++                    VRING_DESC_F_NEXT as u16,
++                    0,
++                ),
++                SplitDescriptor::new(tx_addr, TRANSFER_LEN, VRING_DESC_F_NEXT as u16, 0),
++                SplitDescriptor::new(
++                    rx_addr,
++                    TRANSFER_LEN,
++                    (VRING_DESC_F_NEXT | VRING_DESC_F_WRITE) as u16,
++                    0,
++                ),
++                SplitDescriptor::new(
++                    result_addr,
++                    size_of::<VirtioSpiTransferResult>() as u32,
++                    VRING_DESC_F_WRITE as u16,
++                    0,
++                ),
++            ];
++            let (vring, mem) = setup_descs(&descs);
++
++            let out_hdr = VirtioSpiTransferHead {
++                chip_select_id: 0,
++                bits_per_word: 8,
++                cs_change: 0,
++                tx_nbits: 1,
++                rx_nbits: 1,
++                reserved1: 0,
++                reserved2: 0,
++                reserved3: 0,
++                mode: From::from(0),
++                freq: From::from(10000),
++                word_delay_ns: From::from(0),
++                cs_setup_ns: From::from(0),
++                cs_delay_hold_ns: From::from(0),
++                cs_change_delay_inactive_ns: From::from(0),
++            };
++            mem.memory()
++                .write_obj(out_hdr, GuestAddress(header_addr))
++                .expect("writing transfer header");
++            backend.update_memory(mem.clone()).unwrap();
++
++            (backend, vring, mem)
++        }
++
++        let barrier = Arc::new(std::sync::Barrier::new(2));
++        let (backend_a, vring_a, mem_a) = make_context(barrier.clone());
++        let (backend_b, vring_b, mem_b) = make_context(barrier);
++        let hwm_before = vm_hwm_kib();
++
++        let guest_a = std::thread::spawn(move || backend_a.process_queue(&vring_a).unwrap());
++        let guest_b = std::thread::spawn(move || backend_b.process_queue(&vring_b).unwrap());
++        guest_a.join().expect("first guest backend thread");
++        guest_b.join().expect("second guest backend thread");
++
++        let hwm_delta_kib = vm_hwm_kib().saturating_sub(hwm_before);
++        let expected_bytes = 4 * TRANSFER_LEN as u64;
++        let minimum_expected_kib = (expected_bytes * 3 / 4) / 1024;
++        eprintln!(
++            "SPI concurrent backend repro: backend_instances=2; transfer_len={} bytes each; expected concurrent TX+RX allocation={} bytes; VmHWM delta={} KiB",
++            TRANSFER_LEN, expected_bytes, hwm_delta_kib
++        );
++        assert!(
++            hwm_delta_kib >= minimum_expected_kib,
++            "expected concurrent VmHWM growth of at least {minimum_expected_kib} KiB; observed {hwm_delta_kib} KiB"
++        );
++        validate_trans_result(mem_a, 0x60_00000, ResponseStatus::TransOk as u8);
++        validate_trans_result(mem_b, 0x60_00000, ResponseStatus::TransOk as u8);
++    }
++
  }
