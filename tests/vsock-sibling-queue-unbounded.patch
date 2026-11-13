@@ -280,7 +280,7 @@ diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-de
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,409 @@
 +use std::{
 +    path::Path,
 +    process::{Child, Command, Stdio},
@@ -312,7 +312,7 @@ new file mode 100644
 +
 +const QUEUE_SIZE: u16 = 1024;
 +const MEMORY_SIZE: usize = 64 * 1024 * 1024;
-+const PACKET_COUNT: usize = 505;
++const PACKET_COUNT: usize = 511;
 +const PAYLOAD_SIZE: usize = 64 * 1024;
 +const SOURCE_CID: u64 = 40;
 +const TARGET_CID: u64 = 41;
@@ -607,18 +607,32 @@ new file mode 100644
 +    let target_rx = make_packet_descriptors(&target_memory, PACKET_COUNT, true);
 +    let target_queues = create_queues(&target_memory, Some((0, &target_rx)));
 +
-+    // Hide the already prepared RX descriptor chains until after the sender has
-+    // completed its TX requests. The descriptors exist in guest RAM but are not
-+    // available to the backend while avail.idx is zero.
++    // Both virtqueues have descriptor chains prepared in guest RAM, but neither
++    // becomes available until both devices have completed vhost-user setup.
++    source_memory
++        .write_obj(
++            0u16,
++            GuestAddress(source_queues[1].avail_ring() + 2),
++        )
++        .expect("hold source TX descriptors");
 +    target_memory
 +        .write_obj(
 +            0u16,
 +            GuestAddress(target_queues[0].avail_ring() + 2),
 +        )
-+        .expect("hide target RX descriptors");
++        .expect("hold target RX descriptors");
 +
 +    let mut source = configure_frontend(&source_control, &source_memory, source_queues);
 +    let target = configure_frontend(&target_control, &target_memory, target_queues);
++
++    // Both daemon-side devices are now activated. Publish the source TX chains
++    // only now, while the target still has no RX buffers available.
++    source_memory
++        .write_obj(
++            PACKET_COUNT as u16,
++            GuestAddress(source.queues[1].avail_ring() + 2),
++        )
++        .expect("publish source TX descriptors");
 +
 +    // A TX kick enters the actual vhost-user backend event loop. The sender's
 +    // TX descriptors complete although the receiver has no available RX buffers.
