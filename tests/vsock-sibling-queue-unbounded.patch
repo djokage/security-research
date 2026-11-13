@@ -1,0 +1,104 @@
+diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/thread_backend.rs
+index 0000000..0000000 100644
+--- a/vhost-device-vsock/src/thread_backend.rs
++++ b/vhost-device-vsock/src/thread_backend.rs
+@@
+     fn test_vsock_thread_backend_sibling_vms() {
+@@
+         test_dir.close().unwrap();
+     }
++
++    #[test]
++    fn test_sibling_raw_packets_accumulate_without_receiver_drain() {
++        const SOURCE_CID: u64 = 30;
++        const TARGET_CID: u64 = 31;
++        const PACKET_COUNT: usize = 2048;
++        const PAYLOAD_SIZE: usize = CONN_TX_BUF_SIZE as usize;
++        const SHARED_GROUP: &str = "default";
++
++        let test_dir = tempdir().expect("Could not create a temporary directory");
++        let cid_map: Arc<RwLock<CidMap>> = Arc::new(RwLock::new(HashMap::new()));
++
++        let target_config = VsockConfig::new(
++            TARGET_CID,
++            test_dir.path().join("target-vhost.sock"),
++            BackendType::UnixDomainSocket(test_dir.path().join("target-vsock.sock")),
++            CONN_TX_BUF_SIZE,
++            QUEUE_SIZE,
++            vec![SHARED_GROUP.to_string()],
++        );
++        let target_backend =
++            VhostUserVsockBackend::new(target_config, cid_map.clone()).unwrap();
++
++        // Reading the config activates the target backend and publishes its
++        // raw-packet queue in the shared CID map.
++        assert_eq!(target_backend.get_config(0, 8).len(), 8);
++        let target_raw_queue = target_backend.threads[0]
++            .lock()
++            .unwrap()
++            .thread_backend
++            .raw_pkts_queue
++            .clone();
++
++        let sender_groups = Arc::new(RwLock::new(
++            vec![SHARED_GROUP.to_string()].into_iter().collect::<HashSet<_>>(),
++        ));
++        let mut sender = VsockThreadBackend::new(
++            BackendType::UnixDomainSocket(test_dir.path().join("source-vsock.sock")),
++            epoll::create(false).unwrap(),
++            SOURCE_CID,
++            CONN_TX_BUF_SIZE,
++            sender_groups,
++            cid_map,
++        );
++
++        // This is a valid maximum-sized payload for the default 64 KiB
++        // TX buffer. The receiver deliberately does not drain its RX queue.
++        let payload = vec![0x5a; PAYLOAD_SIZE];
++        let mut packet_raw = vec![0u8; PKT_HEADER_SIZE + PAYLOAD_SIZE];
++        let (header, data) = packet_raw.split_at_mut(PKT_HEADER_SIZE);
++        // SAFETY: header and data are disjoint, valid buffers of the lengths
++        // required by VsockPacket::new().
++        let mut packet = unsafe { VsockPacket::new(header, Some(data)).unwrap() };
++        packet
++            .set_type(VSOCK_TYPE_STREAM)
++            .set_src_cid(SOURCE_CID)
++            .set_dst_cid(TARGET_CID)
++            .set_src_port(9000)
++            .set_dst_port(1234)
++            .set_op(VSOCK_OP_RW)
++            .set_len(PAYLOAD_SIZE as u32);
++        packet.data_slice().unwrap().copy_from(&payload);
++
++        for _ in 0..PACKET_COUNT {
++            sender
++                .send_pkt(&packet)
++                .expect("same-group sibling packet should be accepted");
++        }
++
++        let queued = target_raw_queue.read().unwrap();
++        let queued_payload_bytes: usize =
++            queued.iter().map(|raw_packet| raw_packet.data.len()).sum();
++
++        assert_eq!(queued.len(), PACKET_COUNT);
++        assert_eq!(queued_payload_bytes, PACKET_COUNT * PAYLOAD_SIZE);
++        assert!(
++            queued.len() > QUEUE_SIZE,
++            "the recipient queue grew beyond the configured virtqueue size"
++        );
++
++        eprintln!(
++            "VSOCK_SIBLING_QUEUE packets={} payload_each={} queued_packets={} queued_payload_bytes={} receiver_drained=false",
++            PACKET_COUNT,
++            PAYLOAD_SIZE,
++            queued.len(),
++            queued_payload_bytes
++        );
++
++        // The target has not posted an RX descriptor and no code has popped
++        // from its raw-packet queue; all guest-originated payload copies remain
++        // resident despite the sender's TX requests having been accepted.
++        drop(queued);
++        test_dir.close().unwrap();
++    }
+ }
