@@ -1,7 +1,7 @@
 diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/thread_backend.rs
 --- a/vhost-device-vsock/src/thread_backend.rs
 +++ b/vhost-device-vsock/src/thread_backend.rs
-@@ -789,4 +789,98 @@
+@@ -789,4 +789,100 @@
  
          test_dir.close().unwrap();
      }
