@@ -28,7 +28,7 @@ diff --git a/vhost-device-spi/src/socket_test.rs b/vhost-device-spi/src/socket_t
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-spi/src/socket_test.rs
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,262 @@
 +//! End-to-end vhost-user socket test for guest-controlled SPI transfer sizes.
 +
 +use std::{
