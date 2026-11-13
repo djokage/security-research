@@ -38,17 +38,18 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
 +            .raw_pkts_queue
 +            .clone();
 +
-+        let sender_groups = Arc::new(RwLock::new(
-+            vec![SHARED_GROUP.to_string()].into_iter().collect::<HashSet<_>>(),
-+        ));
-+        let mut sender = VsockThreadBackend::new(
-+            BackendType::UnixDomainSocket(test_dir.path().join("source-vsock.sock")),
-+            epoll::create(false).unwrap(),
++        let source_config = VsockConfig::new(
 +            SOURCE_CID,
++            test_dir.path().join("source-vhost.sock"),
++            BackendType::UnixDomainSocket(test_dir.path().join("source-vsock.sock")),
 +            CONN_TX_BUF_SIZE,
-+            sender_groups,
-+            cid_map,
++            QUEUE_SIZE,
++            vec![SHARED_GROUP.to_string()],
 +        );
++        let source_backend =
++            VhostUserVsockBackend::new(source_config, cid_map.clone()).unwrap();
++        assert_eq!(source_backend.get_config(0, 8).len(), 8);
++        let mut source_thread = source_backend.threads[0].lock().unwrap();
 +
 +        // This is a valid maximum-sized payload for the default 64 KiB
 +        // TX buffer. The receiver deliberately does not drain its RX queue.
@@ -69,7 +70,8 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
 +        packet.data_slice().unwrap().copy_from(&payload);
 +
 +        for _ in 0..PACKET_COUNT {
-+            sender
++            source_thread
++                .thread_backend
 +                .send_pkt(&packet)
 +                .expect("same-group sibling packet should be accepted");
 +        }
