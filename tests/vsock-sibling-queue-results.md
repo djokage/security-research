@@ -8,7 +8,7 @@ A focused test was applied to the production vhost-device-vsock source at:
 
 0484a75df5c8e77a708af10b24dd34f596b25084
 
-The tests create two VhostUserVsockThread instances in one process sharing the same CidMap. Both use the default "default" group. The guest-TX test builds guest memory and a split TX virtqueue with 511 readable two-descriptor VSOCK packet chains, then invokes the production process_tx() routine. The receiver has no RX buffers and does not drain its raw-packet queue. A second test invokes the production sibling send_pkt() path for 2,048 maximum-sized packets.
+The tests run against the pinned upstream source. The unit-level guest-TX test builds guest memory and a split TX virtqueue with 511 readable two-descriptor VSOCK packet chains, then invokes the production process_tx() routine. The receiver has no RX buffers and does not drain its raw-packet queue. A second test invokes the production sibling send_pkt() path for 2,048 maximum-sized packets. A separate integration test starts one real vhost-device-vsock daemon process with two --vm configurations, connects two independent vhost-user frontends, shares file-backed guest memory with each backend, negotiates features and configures all three virtqueues per device.
 
 Observed output:
 
@@ -17,19 +17,30 @@ Observed output:
 
 The guest-TX path accepted and completed all 511 TX descriptor chains (used index 511) and retained 33,488,896 bytes (31.94 MiB) of payload in the receiver queue. The direct production-method stress test retained 2,048 packets containing 134,217,728 bytes (128 MiB) of copied payload. This is twice the configured 1,024-entry virtqueue size. The recipient queue is a separate VecDeque; it is not bounded by the virtqueue size.
 
+## Full vhost-user socket integration
+
+The integration test holds both the source TX and destination RX available indices at zero while the two devices are configured. It then publishes the 511 source TX chains and kicks queue 1 through the source vhost-user frontend. All 511 TX descriptors complete while the destination RX used index remains zero. The test then publishes 511 destination RX chains and kicks queue 0 through the destination frontend. All 511 RX descriptors complete, and the test verifies the contents of all 511 received 64 KiB payloads.
+
+Observed output:
+
+    VSOCK_VHOST_USER_E2E packets=511 payload_each=65536 verified_payload_bytes=33488896 tx_used_index=511 rx_used_index=511 receiver_initial_rx_buffers=0 delayed_rx_delivery=verified
+
+This exercises the daemon process, both actual Unix vhost-user control sockets, shared guest RAM file descriptors, negotiated features, vring configuration, kick eventfds, TX processing, sibling forwarding, delayed RX posting, and RX delivery. It is a complete vhost-user transport integration test with emulated guest memory and virtqueues; it does not boot a guest operating system or launch a hypervisor.
+
 ## Test execution
 
-GitHub Actions run:
+Successful GitHub Actions run:
 
-https://github.com/djokage/security-research/actions/runs/43492729909
+https://github.com/djokage/security-research/actions/runs/43501555395
 
 Results:
 
 - Unmodified Unix-backend crate tests: 33 passed, 0 failed.
 - Guest TX virtqueue reproduction: 1 passed; 511 TX descriptor chains completed and 33,488,896 queued payload bytes observed.
 - Direct sibling-queue stress reproduction: 1 passed; 2,048 packets and 134,217,728 queued payload bytes observed.
-- Full Unix-backend crate test suite with both reproductions: 35 passed, 0 failed.
-- The default backend_vsock feature was disabled for this CI run because two unrelated upstream tests require the unavailable vsock_loopback kernel module. The Unix-domain-socket backend used by this reproduction was tested.
+- Full vhost-user socket integration: 1 passed; all 511 TX descriptors completed, all 511 RX descriptors completed after RX buffers were delayed, and all 33,488,896 received payload bytes were verified.
+- Full Unix-backend crate test suite: 35 passed, 0 failed. The integration test was also run separately with output capture enabled.
+- The default backend_vsock feature was disabled because two unrelated upstream tests require the unavailable vsock_loopback kernel module. The Unix-domain-socket backend used by this reproduction was tested.
 
 ## Relevant code path
 
