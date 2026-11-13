@@ -1,5 +1,5 @@
 name: SPI backend baseline validation
-# Runs the vhost-user Unix-socket reproduction and checks its runtime result.
+# Runs the vhost-user Unix-socket reproduction and checks its runtime result (updated).
 
 on:
   workflow_dispatch:
