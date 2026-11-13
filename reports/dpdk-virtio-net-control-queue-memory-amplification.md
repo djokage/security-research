@@ -14,6 +14,7 @@ In a deployment where one DPDK vhost process serves multiple guests, memory exha
 - Component: vhost virtio-net control queue
 - File: `lib/vhost/virtio_net_ctrl.c`
 - Function: `virtio_net_ctrl_pop()`
+- Tested source revision: `e75a66edd20d1cf1f22984c53bfd2bce8c883953`
 - CWE: CWE-789 (Memory Allocation with Excessive Size); CWE-400 (Uncontrolled Resource Consumption)
 - Impact: Denial of service; cross-tenant impact is conditional on multiple guests sharing the same DPDK vhost process
 
@@ -21,10 +22,10 @@ In a deployment where one DPDK vhost process serves multiple guests, memory exha
 
 The parser walks the readable descriptors and adds each descriptor length to `data_len`. It then checks that the request is large enough to contain the control class and command bytes, allocates `data_len` bytes, and performs a second pass that copies the contents of each readable descriptor into that allocation.
 
-The copy-length guard added to prevent a copied-length overrun checks that the copy does not exceed the previously calculated `data_len`. It does not impose a maximum request size. As a result, a descriptor chain whose aggregate length is very large still passes this check and can cause a correspondingly large allocation.
+The copy-length guard checks that the copy does not exceed the previously calculated `data_len`. It does not impose a maximum request size. As a result, a descriptor chain whose aggregate length is very large still passes this check and can cause a correspondingly large allocation.
 
-- [`virtio_net_ctrl_pop()` in DPDK](https://github.com/DPDK/dpdk/blob/main/lib/vhost/virtio_net_ctrl.c)
-- [Guest physical address to host virtual address mapping](https://github.com/DPDK/dpdk/blob/main/lib/vhost/rte_vhost.h)
+- [`virtio_net_ctrl_pop()` at the tested DPDK revision](https://github.com/DPDK/dpdk/blob/e75a66edd20d1cf1f22984c53bfd2bce8c883953/lib/vhost/virtio_net_ctrl.c#L20-L195)
+- [Guest physical address to host virtual address mapping at the tested revision](https://github.com/DPDK/dpdk/blob/e75a66edd20d1cf1f22984c53bfd2bce8c883953/lib/vhost/rte_vhost.h)
 
 The address mapping validates that the guest address belongs to a mapped guest-memory region and limits the mapped length to that region. It does not prevent multiple descriptors from referring to the same valid address. Repeated references therefore still contribute their full lengths to the aggregate and are copied repeatedly.
 
@@ -36,29 +37,43 @@ That is sufficient for the following descriptor chain: 63 readable descriptors f
 
 ## Reproduction
 
-A standalone C reproduction of the descriptor aggregation and copy logic was run. It used 64 queue entries:
+A focused C harness was compiled and run against the upstream parser logic at the pinned DPDK revision above. The `virtio_net_ctrl_pop()` function body was copied verbatim into the harness. DPDK queue and memory structures, atomic/logging helpers, and the guest-address translation wrapper were shimmed; the address translation wrapper follows the behavior of DPDK's inline `rte_vhost_va_from_guest_pa()` helper. The vhost library itself was not built or linked.
 
-- 63 readable descriptors, each with a length of 1 MiB
-- All 63 readable descriptors pointed to the same valid 1 MiB buffer
-- One final writable acknowledgement descriptor of length 1 byte
+The test used a 64-entry queue and two descriptor-chain sizes:
+
+- Case 1: 63 readable descriptors, each 1 MiB, all pointing to the same valid 1 MiB guest buffer; one final one-byte writable acknowledgement descriptor.
+- Case 2: 63 readable descriptors, each 4 MiB, all pointing to the same valid 4 MiB guest buffer; one final one-byte writable acknowledgement descriptor.
 
 Observed output:
 
 ```
-control queue entries: 64
-readable descriptors:  63
-unique guest buffer:    1048576 bytes
-summed data_len:        66060288 bytes (63 MiB)
-peak RSS before alloc:  1664 KiB
-copied bytes:           66060288
-copy verification:      passed for all 63 descriptors
-peak RSS after copy:    66048 KiB
-host copy amplification: 63x
+virtio_net_ctrl_pop return: 1
+queue entries: 64; readable descriptors: 63
+one mapped guest buffer: 1048576 bytes
+elem.data_len: 66060288 bytes (63.00 MiB)
+descriptor count accepted: 64
+same-buffer copy verification: PASS
+ack descriptor mapped: yes
+post-copy command handler response: ERR (unsupported request, after allocation/copy)
+last_avail_idx after pop: 1
+
+virtio_net_ctrl_pop return: 1
+queue entries: 64; readable descriptors: 63
+one mapped guest buffer: 4194304 bytes
+elem.data_len: 264241152 bytes (252.00 MiB)
+descriptor count accepted: 64
+same-buffer copy verification: PASS
+ack descriptor mapped: yes
+post-copy command handler response: ERR (unsupported request, after allocation/copy)
+last_avail_idx after pop: 1
+
+Maximum resident set size: 262764 KiB
+Exit status: 0
 ```
 
-The test confirms that this descriptor pattern produces a 63 MiB allocation and copy from a single 1 MiB guest buffer when the parser's aggregation and copy logic is applied.
+Both cases were accepted by the upstream parser body. The parser allocated the aggregate size and copied every descriptor's contents, despite all readable descriptors referring to the same guest buffer. The unsupported request was rejected by the request handler only after the allocation and copy had completed.
 
-This was a standalone reproduction of the relevant parser algorithm. It did not execute DPDK's actual `virtio_net_ctrl_pop()` function or instantiate a complete vhost-user device. An upstream integration test is still needed to verify the complete descriptor and guest-memory mapping path.
+This is stronger than a reimplementation of the algorithm: the parser function body from the pinned upstream source was compiled and executed. It is still a focused harness, not a full DPDK build or a QEMU-to-vhost-user integration test. The harness does not exercise DPDK's complete runtime, real vhost-user connection setup, or the full guest-memory registration path.
 
 ## Attack scenario
 
@@ -72,7 +87,9 @@ The control request is validated after the aggregate allocation and copy, so an 
 
 ## Impact
 
-A malicious guest can cause host-side memory allocation and copying far beyond the size of the unique guest buffer it supplies. With 63 descriptors each advertising 256 MiB, and a guest-memory mapping large enough to cover that range, the aggregate allocation would be 15.75 GiB for one request.
+A malicious guest can cause host-side memory allocation and copying far beyond the size of the unique guest buffer it supplies. The focused test measured 252 MiB of aggregate allocation and copying from a single 4 MiB guest buffer.
+
+With 63 descriptors each advertising 256 MiB, and a guest-memory mapping large enough to cover that range, the aggregate allocation would be 15.75 GiB for one request. This larger case is calculated from the tested descriptor arithmetic; it was not executed in the test.
 
 The practical impact depends on the guest-memory mapping, available host memory, and the DPDK deployment. In a shared vhost process serving multiple guests, sufficiently large or repeated requests can exhaust process or host memory, stall the backend, or cause it to be terminated by the OOM killer. Other guests attached to that process can consequently lose their backend service. This is a conditional cross-tenant denial of service, not an assertion that every DPDK deployment shares one process between tenants.
 
