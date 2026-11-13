@@ -70,7 +70,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          timeout 180s cargo test --locked -p vhost-device-spi process_requests_allocates_guest_sized_buffers_before_param_validation -- --nocapture 2>&1 | tee ../artifacts/spi-allocation-repro.log
+          {
+            timeout 180s cargo test --locked -p vhost-device-spi process_requests_allocates_guest_sized_buffers_before_param_validation -- --nocapture
+            timeout 180s cargo test --locked -p vhost-device-spi spi_guest_batch_requests_scale_allocation -- --nocapture
+            timeout 180s cargo test --locked -p vhost-device-spi spi_guest_backends_overlap_allocations -- --nocapture
+          } 2>&1 | tee ../artifacts/spi-allocation-repro.log
 
       - name: Upload validation logs
         if: always()
