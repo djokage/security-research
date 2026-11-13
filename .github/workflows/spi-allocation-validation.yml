@@ -1,0 +1,64 @@
+name: SPI backend baseline validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spi-allocation-validation
+    paths:
+      - ".github/workflows/spi-allocation-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  spi-baseline:
+    name: Build and test pinned vhost-device-spi
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+      UPSTREAM_REPOSITORY: https://github.com/rust-vmm/vhost-device.git
+      UPSTREAM_REVISION: 0484a75df5c8e77a708af10b24dd34f596b25084
+
+    steps:
+      - name: Check out research repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch exact upstream revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$UPSTREAM_REPOSITORY" upstream
+          git -C upstream checkout --detach "$UPSTREAM_REVISION"
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_REVISION"
+          mkdir -p artifacts
+          {
+            echo "upstream_repository=$UPSTREAM_REPOSITORY"
+            echo "upstream_revision=$(git -C upstream rev-parse HEAD)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "runner=$(uname -a)"
+            echo
+            git -C upstream show -s --format=fuller HEAD
+          } | tee artifacts/environment.txt
+
+      - name: Run SPI backend tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p vhost-device-spi --all-targets 2>&1 | tee ../artifacts/spi-cargo-test.log
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spi-baseline-validation
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
