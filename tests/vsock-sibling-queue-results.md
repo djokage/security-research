@@ -8,25 +8,27 @@ A focused test was applied to the production vhost-device-vsock source at:
 
 0484a75df5c8e77a708af10b24dd34f596b25084
 
-The test creates two configured VhostUserVsockBackend instances sharing the same CidMap, activates both backends, and sends valid 64 KiB VSOCK stream packets from the source backend to the recipient. Both backends use the default "default" group. The recipient does not drain its raw-packet queue.
+The tests create two VhostUserVsockThread instances in one process sharing the same CidMap. Both use the default "default" group. The guest-TX test builds guest memory and a split TX virtqueue with 511 readable two-descriptor VSOCK packet chains, then invokes the production process_tx() routine. The receiver has no RX buffers and does not drain its raw-packet queue. A second test invokes the production sibling send_pkt() path for 2,048 maximum-sized packets.
 
 Observed output:
 
+    VSOCK_GUEST_TX_QUEUE packets=511 payload_each=65536 queued_packets=511 queued_payload_bytes=33488896 tx_used_index=511 receiver_drained=false
     VSOCK_SIBLING_QUEUE packets=2048 payload_each=65536 queued_packets=2048 queued_payload_bytes=134217728 receiver_drained=false
 
-The recipient retained 2,048 packets containing 134,217,728 bytes (128 MiB) of copied payload. This is twice the configured 1,024-entry virtqueue size. The queue itself is a separate VecDeque; it is not bounded by the virtqueue size.
+The guest-TX path accepted and completed all 511 TX descriptor chains (used index 511) and retained 33,488,896 bytes (31.94 MiB) of payload in the receiver queue. The direct production-method stress test retained 2,048 packets containing 134,217,728 bytes (128 MiB) of copied payload. This is twice the configured 1,024-entry virtqueue size. The recipient queue is a separate VecDeque; it is not bounded by the virtqueue size.
 
 ## Test execution
 
 GitHub Actions run:
 
-https://github.com/djokage/security-research/actions/runs/43473423083
+https://github.com/djokage/security-research/actions/runs/43492729909
 
 Results:
 
 - Unmodified Unix-backend crate tests: 33 passed, 0 failed.
-- Targeted sibling-queue reproduction: 1 passed.
-- Full Unix-backend crate tests after adding the reproduction: 34 passed, 0 failed.
+- Guest TX virtqueue reproduction: 1 passed; 511 TX descriptor chains completed and 33,488,896 queued payload bytes observed.
+- Direct sibling-queue stress reproduction: 1 passed; 2,048 packets and 134,217,728 queued payload bytes observed.
+- Full Unix-backend crate test suite with both reproductions: 35 passed, 0 failed.
 - The default backend_vsock feature was disabled for this CI run because two unrelated upstream tests require the unavailable vsock_loopback kernel module. The Unix-domain-socket backend used by this reproduction was tested.
 
 ## Relevant code path
@@ -42,7 +44,7 @@ The source files thread_backend.rs, vhu_vsock_thread.rs, vhu_vsock.rs, and main.
 
 A guest that can send sibling-vsock traffic to another VM in a shared group can cause the recipient's raw-packet queue to retain guest-controlled payload copies while that recipient does not provide RX buffers. Since the queue is unbounded, repeated traffic can grow memory use in the shared vhost-device-vsock process. In a deployment with multiple VM backends in that process, exhausting or terminating the process can disrupt the other VMs served by it.
 
-This is a reproduced unbounded queue-growth and host-memory-consumption issue in the backend's sibling forwarding method. The test calls the production send_pkt() method on the configured source backend; it does not launch a guest VM or exercise the complete vhost-user socket and virtqueue transport. No host OOM kill or production outage was observed. Those are impact consequences to assess, not claimed test results.
+This is a reproduced unbounded queue-growth and host-memory-consumption issue reachable through the production guest TX virtqueue processing routine using constructed guest memory and descriptors, as well as through the underlying production send_pkt() method. The test does not launch a guest VM or exercise a complete vhost-user socket session. No host OOM kill or production outage was observed. The demonstrated impact is retained guest-controlled payload memory in a shared backend process; termination of that process could disrupt the other VM backends hosted by it.
 
 ## Suggested remediation
 
