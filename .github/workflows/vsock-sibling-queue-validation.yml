@@ -1,0 +1,82 @@
+name: Vsock sibling raw queue validation
+
+on:
+  push:
+    branches:
+      - vsock-sibling-queue-audit
+    paths:
+      - ".github/workflows/vsock-sibling-queue-validation.yml"
+      - "tests/vsock-sibling-queue-unbounded.patch"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Test sibling packet queue against pinned upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+      UPSTREAM_REPOSITORY: https://github.com/rust-vmm/vhost-device.git
+      UPSTREAM_REVISION: 0484a75df5c8e77a708af10b24dd34f596b25084
+
+    steps:
+      - name: Check out research repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch exact upstream revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$UPSTREAM_REPOSITORY" upstream
+          git -C upstream checkout --detach "$UPSTREAM_REVISION"
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_REVISION"
+          mkdir -p artifacts
+          {
+            echo "upstream_repository=$UPSTREAM_REPOSITORY"
+            echo "upstream_revision=$(git -C upstream rev-parse HEAD)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "runner=$(uname -a)"
+            echo
+            git -C upstream show -s --format=fuller HEAD
+          } | tee artifacts/environment.txt
+
+      - name: Run unmodified vsock crate tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 240s cargo test --locked -p vhost-device-vsock --all-targets 2>&1 | tee ../artifacts/upstream-baseline.log
+
+      - name: Apply queue reproduction test
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check ../tests/vsock-sibling-queue-unbounded.patch
+          git apply ../tests/vsock-sibling-queue-unbounded.patch
+          git diff --check
+          git diff -- vhost-device-vsock/src/thread_backend.rs > ../artifacts/vsock-test.diff
+
+      - name: Run targeted reproduction and full crate tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 240s cargo test --locked -p vhost-device-vsock --all-targets test_sibling_raw_packets_accumulate_without_receiver_drain -- --nocapture 2>&1 | tee ../artifacts/vsock-queue-repro.log
+          timeout 300s cargo test --locked -p vhost-device-vsock --all-targets 2>&1 | tee ../artifacts/vsock-full-tests.log
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsock-sibling-queue-validation
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
