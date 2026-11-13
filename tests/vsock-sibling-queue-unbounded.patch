@@ -280,7 +280,7 @@ diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-de
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,401 @@
 +use std::{
 +    fs::OpenOptions,
 +    path::Path,
