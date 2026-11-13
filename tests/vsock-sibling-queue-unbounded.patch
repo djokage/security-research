@@ -106,28 +106,27 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
 diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src/vhu_vsock_thread.rs
 --- a/vhost-device-vsock/src/vhu_vsock_thread.rs
 +++ b/vhost-device-vsock/src/vhu_vsock_thread.rs
-@@
-     use tempfile::tempdir;
-+    use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_NEXT;
-+    use virtio_queue::{
-+        desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
-+        mock::MockSplitQueue,
-+        Queue, QueueT,
-+    };
--    use vm_memory::GuestAddress;
-+    use vm_memory::{Bytes, GuestAddress};
-+    use std::time::{Duration, Instant};
-@@
+@@ -1152,4 +1152,160 @@
          t.process_backend_evt(EventSet::empty());
      }
+ }
 +
 +    #[test]
 +    fn test_sibling_queue_via_guest_tx_vring() {
++        use std::time::{Duration, Instant};
++        use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_NEXT;
++        use virtio_queue::{
++            desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
++            mock::MockSplitQueue,
++            Queue,
++        };
++        use vm_memory::{Bytes, GuestAddress};
++
 +        const SOURCE_CID: u64 = 40;
 +        const TARGET_CID: u64 = 41;
 +        const PACKET_COUNT: usize = 511;
 +        const PAYLOAD_SIZE: usize = CONN_TX_BUF_SIZE as usize;
-+        const QUEUE_SIZE: u16 = 1024;
++        const TX_QUEUE_SIZE: u16 = 1024;
 +        const SHARED_GROUP: &str = "default";
 +
 +        let test_dir = tempdir().expect("Could not create a temporary directory");
@@ -154,9 +153,8 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        .unwrap();
 +        source.activate();
 +
-+        // Build real guest memory and a split TX virtqueue containing 511
-+        // valid two-descriptor VSOCK packets. The recipient posts no RX
-+        // descriptors, so its sibling-packet queue is never drained.
++        // Model guest RAM and a split TX virtqueue. Each available entry
++        // contains a readable VSOCK header followed by a readable payload.
 +        let guest_memory =
 +            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 40 * 1024 * 1024)])
 +                .unwrap();
@@ -164,13 +162,15 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        source.mem = Some(mem.clone());
 +        let mem_handle = mem.memory();
 +
-+        let vq = MockSplitQueue::create(&*mem_handle, GuestAddress(0x1000), QUEUE_SIZE);
++        let mock_queue =
++            MockSplitQueue::create(&*mem_handle, GuestAddress(0x1000), TX_QUEUE_SIZE);
 +        let mut next_addr = 0x1_0000u64;
 +        let mut descriptors = Vec::with_capacity(PACKET_COUNT * 2);
 +        let payload = vec![0x5a; PAYLOAD_SIZE];
 +
-+        let mut packet_raw = vec![0u8; PKT_HEADER_SIZE + PAYLOAD_SIZE];
-+        let (header, data) = packet_raw.split_at_mut(PKT_HEADER_SIZE);
++        let mut packet_storage = vec![0u8; PKT_HEADER_SIZE + PAYLOAD_SIZE];
++        let (header, data) = packet_storage.split_at_mut(PKT_HEADER_SIZE);
++        // SAFETY: the packet header and payload are disjoint valid buffers.
 +        let mut packet = unsafe { VsockPacket::new(header, Some(data)).unwrap() };
 +        packet
 +            .set_type(crate::vhu_vsock::VSOCK_TYPE_STREAM)
@@ -212,26 +212,27 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +
 +        let raw_descriptors: Vec<RawDescriptor> =
 +            descriptors.into_iter().map(RawDescriptor::from).collect();
-+        vq.build_multiple_desc_chains(&raw_descriptors)
-+            .expect("could not build TX descriptor chains");
++        mock_queue
++            .build_multiple_desc_chains(&raw_descriptors)
++            .expect("could not build guest TX descriptor chains");
 +
-+        let queue: Queue = vq.create_queue().unwrap();
-+        let vring = VringRwLock::new(mem.clone(), QUEUE_SIZE).unwrap();
++        let queue: Queue = mock_queue.create_queue().unwrap();
++        let vring = VringRwLock::new(mem.clone(), TX_QUEUE_SIZE).unwrap();
 +        vring
 +            .set_queue_info(queue.desc_table(), queue.avail_ring(), queue.used_ring())
 +            .unwrap();
-+        let call_event = EventFd::new(0).unwrap();
++        let call_event = EventFd::new(EFD_NONBLOCK).unwrap();
++        // Transfer ownership of the eventfd to the vring call file.
 +        let call_file = unsafe { File::from_raw_fd(call_event.as_raw_fd()) };
 +        std::mem::forget(call_event);
 +        vring.set_call(Some(call_file));
 +        vring.set_enabled(true);
 +        vring.set_queue_ready(true);
 +
-+        // This enters the same TX processing routine used for guest
-+        // virtqueue notifications, rather than calling send_pkt() directly.
++        // Exercise the production guest-TX processing routine.
 +        source.process_tx(&vring, false).unwrap();
 +
-+        // The vhost worker completes TX descriptors asynchronously.
++        // The backend returns used descriptors from its worker thread.
 +        let used_index_addr = queue.used_ring().unchecked_add(2);
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        let used_index = loop {
@@ -241,7 +242,7 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +            }
 +            assert!(
 +                Instant::now() < deadline,
-+                "TX descriptors were not completed; used index={index}"
++                "guest TX descriptors were not completed; used index={index}"
 +            );
 +            std::thread::yield_now();
 +        };
@@ -265,4 +266,4 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        drop(queued);
 +        test_dir.close().unwrap();
 +    }
- }
+
