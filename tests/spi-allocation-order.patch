@@ -1,11 +1,109 @@
 diff --git a/vhost-device-spi/src/vhu_spi.rs b/vhost-device-spi/src/vhu_spi.rs
 --- a/vhost-device-spi/src/vhu_spi.rs
 +++ b/vhost-device-spi/src/vhu_spi.rs
-@@ -1475,5 +1475,275 @@
+@@ -1475,5 +1475,374 @@
          // Hit the non-loop part
          backend.set_event_idx(false);
          backend.handle_event(0, EventSet::IN, &[vring], 0).unwrap();
      }
++    #[test]
++    fn process_requests_allocates_guest_sized_buffers_before_param_validation() {
++        // Keep this reproduction bounded: two 32 MiB buffers (64 MiB total).
++        const TRANSFER_LEN: u32 = 32 * 1024 * 1024;
++
++        fn vm_peak_kib() -> u64 {
++            let status = std::fs::read_to_string("/proc/self/status")
++                .expect("reading Linux process status");
++            status
++                .lines()
++                .find(|line| line.starts_with("VmPeak:"))
++                .and_then(|line| line.split_whitespace().nth(1))
++                .and_then(|value| value.parse::<u64>().ok())
++                .expect("parsing VmPeak from /proc/self/status")
++        }
++
++        let spi_dummy_ctrl =
++            SpiController::new(DummyDevice::open(&PathBuf::from("spidev0.0")).unwrap()).unwrap();
++        let mut backend = VhostUserSpiBackend::new(Arc::new(spi_dummy_ctrl)).unwrap();
++
++        let trans_header_addr = 0x10_0000;
++        let tx_buf_addr = 0x20_0000;
++        let rx_buf_addr = 0x30_00000;
++        let result_addr = 0x60_00000;
++
++        let descs = [
++            SplitDescriptor::new(
++                trans_header_addr,
++                size_of::<VirtioSpiTransferHead>() as u32,
++                VRING_DESC_F_NEXT as u16,
++                0,
++            ),
++            SplitDescriptor::new(tx_buf_addr, TRANSFER_LEN, VRING_DESC_F_NEXT as u16, 0),
++            SplitDescriptor::new(
++                rx_buf_addr,
++                TRANSFER_LEN,
++                (VRING_DESC_F_NEXT | VRING_DESC_F_WRITE) as u16,
++                0,
++            ),
++            SplitDescriptor::new(
++                result_addr,
++                size_of::<VirtioSpiTransferResult>() as u32,
++                VRING_DESC_F_WRITE as u16,
++                0,
++            ),
++        ];
++
++        let (vring, mem) = setup_descs(&descs);
++
++        // tx_nbits=2 is rejected by check_trans_params(). The descriptor
++        // lengths are nevertheless consumed to size TX/RX buffers first.
++        let out_hdr = VirtioSpiTransferHead {
++            chip_select_id: 0,
++            bits_per_word: 8,
++            cs_change: 0,
++            tx_nbits: 2,
++            rx_nbits: 1,
++            reserved1: 0,
++            reserved2: 0,
++            reserved3: 0,
++            mode: From::from(0),
++            freq: From::from(10000),
++            word_delay_ns: From::from(0),
++            cs_setup_ns: From::from(0),
++            cs_delay_hold_ns: From::from(0),
++            cs_change_delay_inactive_ns: From::from(0),
++        };
++        mem.memory()
++            .write_obj(out_hdr, GuestAddress(trans_header_addr))
++            .expect("writing transfer header");
++
++        backend.update_memory(mem.clone()).unwrap();
++
++        // Take the baseline after queue and guest-memory setup so the
++        // measured high-water increase comes from processing this request.
++        let peak_before = vm_peak_kib();
++        backend.process_queue(&vring).unwrap();
++        let peak_after = vm_peak_kib();
++        let peak_delta_kib = peak_after.saturating_sub(peak_before);
++        let minimum_expected_kib = (2 * TRANSFER_LEN as u64 * 3 / 4) / 1024;
++
++        eprintln!(
++            "SPI allocation-order repro: transfer_len={} bytes; expected two buffers={} bytes; VmPeak delta={} KiB",
++            TRANSFER_LEN,
++            2 * TRANSFER_LEN as u64,
++            peak_delta_kib
++        );
++
++        assert!(
++            peak_delta_kib >= minimum_expected_kib,
++            "expected VmPeak to grow by at least {minimum_expected_kib} KiB for two guest-sized buffers; observed {peak_delta_kib} KiB"
++        );
++        validate_trans_result(
++            mem,
++            result_addr,
++            ResponseStatus::ParamErr as u8,
++        );
++    }
 +    #[test]
 +    fn spi_guest_batch_requests_scale_allocation() {
 +        const TRANSFER_LEN: u32 = 16 * 1024 * 1024;
