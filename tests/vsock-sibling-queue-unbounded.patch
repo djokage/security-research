@@ -280,9 +280,8 @@ diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-de
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,392 @@
 +use std::{
-+    fs::OpenOptions,
 +    path::Path,
 +    process::{Child, Command, Stdio},
 +    thread,
@@ -572,13 +571,6 @@ new file mode 100644
 +    let target_control = test_dir.path().join("target-vhost.sock");
 +    let source_uds = test_dir.path().join("source-vsock.sock");
 +    let target_uds = test_dir.path().join("target-vsock.sock");
-+    let daemon_log = test_dir.path().join("vhost-device-vsock.log");
-+
-+    let log_file = OpenOptions::new()
-+        .create(true)
-+        .append(true)
-+        .open(&daemon_log)
-+        .expect("create daemon log");
 +
 +    let mut child = DaemonChild(
 +        Command::new(env!("CARGO_BIN_EXE_vhost-device-vsock"))
@@ -594,8 +586,9 @@ new file mode 100644
 +                target_control.display(),
 +                target_uds.display()
 +            ))
-+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
-+            .stderr(Stdio::from(log_file))
++            .env("RUST_LOG", "debug")
++            .stdout(Stdio::inherit())
++            .stderr(Stdio::inherit())
 +            .spawn()
 +            .expect("start real vhost-device-vsock daemon"),
 +    );
@@ -679,6 +672,4 @@ new file mode 100644
 +    drop(target);
 +    drop(source);
 +    child.terminate();
-+    let daemon_output = std::fs::read_to_string(&daemon_log).unwrap_or_default();
-+    eprintln!("vhost-device-vsock daemon log bytes={}", daemon_output.len());
 +}
