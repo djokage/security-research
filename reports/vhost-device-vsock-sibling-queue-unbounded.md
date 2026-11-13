@@ -46,34 +46,40 @@ The recipient consumes raw packets from this queue when it has available RX desc
 
 ## Reproduction evidence
 
-A test patch was applied to the pinned upstream source in GitHub Actions. It exercises the production guest TX processing routine with constructed guest memory and a split virtqueue containing valid two-descriptor packet chains. A second test stresses the production sibling forwarding method directly.
+A validation patch was applied to the pinned upstream source in GitHub Actions. It includes three distinct reproductions.
 
-Observed output from the guest TX virtqueue test:
+The guest TX virtqueue unit test builds guest memory and 511 valid two-descriptor VSOCK packets, then calls the production `process_tx()` routine. The receiver has no RX buffers.
+
+Observed output:
 
 ```
 VSOCK_GUEST_TX_QUEUE packets=511 payload_each=65536 queued_packets=511 queued_payload_bytes=33488896 tx_used_index=511 receiver_drained=false
 ```
 
-The guest TX path completed all 511 TX descriptors and retained 33,488,896 bytes (31.94 MiB) of payload in the recipient queue.
+The receiver queue retained 33,488,896 bytes (31.94 MiB) of copied payload.
 
-Observed output from the direct forwarding stress test:
+A direct stress test of the production sibling forwarding method sends 2,048 packets of 64 KiB each:
 
 ```
 VSOCK_SIBLING_QUEUE packets=2048 payload_each=65536 queued_packets=2048 queued_payload_bytes=134217728 receiver_drained=false
 ```
 
-The recipient queue retained 2,048 packets containing 134,217,728 bytes (128 MiB) of copied payload, twice the configured 1,024-entry virtqueue size.
+The receiver queue retained 134,217,728 bytes (128 MiB) of copied payload. This is the sum of queued payload lengths, not a measured process RSS increase.
 
-The successful run includes:
-- Unmodified Unix-backend crate tests: 33 passed, 0 failed.
-- Guest TX virtqueue reproduction: 1 passed.
-- Direct sibling-queue reproduction: 1 passed.
-- Full Unix-backend crate test suite with both reproductions: 35 passed, 0 failed.
+The full vhost-user integration test starts one real `vhost-device-vsock` daemon process with two VM configurations, connects two independent vhost-user frontend sockets, shares file-backed guest RAM, negotiates features, configures all three virtqueues for each device, and uses the real kick eventfds. The source TX queue is made available while the target RX queue has no available buffers. All TX descriptors complete while target RX used index stays at zero. The test then publishes the target RX buffers and verifies every payload after the daemon delivers it.
 
-[GitHub Actions run and logs](https://github.com/djokage/security-research/actions/runs/43492729909)
+Observed output:
 
-The tests construct guest memory and invoke the production TX processing routine; they do not boot a guest VM or exercise a complete vhost-user socket session. The 128 MiB figure is the sum of queued payload lengths, not a measured process RSS increase. No host OOM kill or production outage was observed.
+```
+VSOCK_VHOST_USER_E2E packets=511 payload_each=65536 verified_payload_bytes=33488896 tx_used_index=511 rx_used_index=511 receiver_initial_rx_buffers=0 delayed_rx_delivery=verified
+```
 
+All 511 TX descriptors and all 511 RX descriptors completed. The test verified all 33,488,896 bytes received through the target frontend.
+
+[Successful GitHub Actions run and logs](https://github.com/djokage/security-research/actions/runs/43501555395)
+
+The integration test exercises the actual daemon and complete vhost-user control/data transport using constructed guest memory and virtqueue descriptors. It does not boot a guest operating system or launch a hypervisor. No host OOM kill or production outage was observed.
+  
 ## Impact
 
 A guest able to submit VSOCK traffic to a sibling VM in the same configured group can cause unbounded memory retention in the shared `vhost-device-vsock` process when the receiving VM does not consume packets. Sustained traffic can exhaust memory available to the daemon and cause its termination. If the daemon serves multiple VMs, this can disrupt the VSOCK devices of the other VMs hosted by that process.
