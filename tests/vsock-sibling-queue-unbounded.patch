@@ -5,6 +5,7 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
  
          test_dir.close().unwrap();
      }
++
 +    #[test]
 +    fn test_sibling_raw_packets_accumulate_without_receiver_drain() {
 +        const SOURCE_CID: u64 = 30;
