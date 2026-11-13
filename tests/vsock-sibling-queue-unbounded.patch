@@ -102,3 +102,167 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
 +        test_dir.close().unwrap();
 +    }
  }
+
+diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src/vhu_vsock_thread.rs
+--- a/vhost-device-vsock/src/vhu_vsock_thread.rs
++++ b/vhost-device-vsock/src/vhu_vsock_thread.rs
+@@
+     use tempfile::tempdir;
++    use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_NEXT;
++    use virtio_queue::{
++        desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
++        mock::MockSplitQueue,
++        Queue, QueueT,
++    };
+-    use vm_memory::GuestAddress;
++    use vm_memory::{Bytes, GuestAddress};
++    use std::time::{Duration, Instant};
+@@
+         t.process_backend_evt(EventSet::empty());
+     }
++
++    #[test]
++    fn test_sibling_queue_via_guest_tx_vring() {
++        const SOURCE_CID: u64 = 40;
++        const TARGET_CID: u64 = 41;
++        const PACKET_COUNT: usize = 511;
++        const PAYLOAD_SIZE: usize = CONN_TX_BUF_SIZE as usize;
++        const QUEUE_SIZE: u16 = 1024;
++        const SHARED_GROUP: &str = "default";
++
++        let test_dir = tempdir().expect("Could not create a temporary directory");
++        let cid_map: Arc<RwLock<CidMap>> = Arc::new(RwLock::new(HashMap::new()));
++
++        let mut target = VhostUserVsockThread::new(
++            BackendType::UnixDomainSocket(test_dir.path().join("target-vsock.sock")),
++            TARGET_CID,
++            CONN_TX_BUF_SIZE,
++            vec![SHARED_GROUP.to_string()],
++            cid_map.clone(),
++        )
++        .unwrap();
++        target.activate();
++        let target_raw_queue = target.thread_backend.raw_pkts_queue.clone();
++
++        let mut source = VhostUserVsockThread::new(
++            BackendType::UnixDomainSocket(test_dir.path().join("source-vsock.sock")),
++            SOURCE_CID,
++            CONN_TX_BUF_SIZE,
++            vec![SHARED_GROUP.to_string()],
++            cid_map,
++        )
++        .unwrap();
++        source.activate();
++
++        // Build real guest memory and a split TX virtqueue containing 511
++        // valid two-descriptor VSOCK packets. The recipient posts no RX
++        // descriptors, so its sibling-packet queue is never drained.
++        let guest_memory =
++            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 40 * 1024 * 1024)])
++                .unwrap();
++        let mem = GuestMemoryAtomic::new(guest_memory);
++        source.mem = Some(mem.clone());
++        let mem_handle = mem.memory();
++
++        let vq = MockSplitQueue::create(&*mem_handle, GuestAddress(0x1000), QUEUE_SIZE);
++        let mut next_addr = 0x1_0000u64;
++        let mut descriptors = Vec::with_capacity(PACKET_COUNT * 2);
++        let payload = vec![0x5a; PAYLOAD_SIZE];
++
++        let mut packet_raw = vec![0u8; PKT_HEADER_SIZE + PAYLOAD_SIZE];
++        let (header, data) = packet_raw.split_at_mut(PKT_HEADER_SIZE);
++        let mut packet = unsafe { VsockPacket::new(header, Some(data)).unwrap() };
++        packet
++            .set_type(crate::vhu_vsock::VSOCK_TYPE_STREAM)
++            .set_src_cid(SOURCE_CID)
++            .set_dst_cid(TARGET_CID)
++            .set_src_port(9000)
++            .set_dst_port(1234)
++            .set_op(crate::vhu_vsock::VSOCK_OP_RW)
++            .set_len(PAYLOAD_SIZE as u32);
++        let mut header_bytes = vec![0u8; PKT_HEADER_SIZE];
++        packet.header_slice().copy_to(&mut header_bytes);
++        drop(packet);
++
++        for packet_index in 0..PACKET_COUNT {
++            let header_addr = next_addr;
++            let data_addr = header_addr + PKT_HEADER_SIZE as u64;
++            mem_handle
++                .write(&header_bytes, GuestAddress(header_addr))
++                .unwrap();
++            mem_handle
++                .write(&payload, GuestAddress(data_addr))
++                .unwrap();
++
++            let head_index = (packet_index * 2) as u16;
++            descriptors.push(SplitDescriptor::new(
++                header_addr,
++                PKT_HEADER_SIZE as u32,
++                VRING_DESC_F_NEXT as u16,
++                head_index + 1,
++            ));
++            descriptors.push(SplitDescriptor::new(
++                data_addr,
++                PAYLOAD_SIZE as u32,
++                0,
++                0,
++            ));
++            next_addr = data_addr + PAYLOAD_SIZE as u64;
++        }
++
++        let raw_descriptors: Vec<RawDescriptor> =
++            descriptors.into_iter().map(RawDescriptor::from).collect();
++        vq.build_multiple_desc_chains(&raw_descriptors)
++            .expect("could not build TX descriptor chains");
++
++        let queue: Queue = vq.create_queue().unwrap();
++        let vring = VringRwLock::new(mem.clone(), QUEUE_SIZE).unwrap();
++        vring
++            .set_queue_info(queue.desc_table(), queue.avail_ring(), queue.used_ring())
++            .unwrap();
++        let call_event = EventFd::new(0).unwrap();
++        let call_file = unsafe { File::from_raw_fd(call_event.as_raw_fd()) };
++        std::mem::forget(call_event);
++        vring.set_call(Some(call_file));
++        vring.set_enabled(true);
++        vring.set_queue_ready(true);
++
++        // This enters the same TX processing routine used for guest
++        // virtqueue notifications, rather than calling send_pkt() directly.
++        source.process_tx(&vring, false).unwrap();
++
++        // The vhost worker completes TX descriptors asynchronously.
++        let used_index_addr = queue.used_ring().unchecked_add(2);
++        let deadline = Instant::now() + Duration::from_secs(5);
++        let used_index = loop {
++            let index: u16 = mem_handle.read_obj(used_index_addr).unwrap();
++            if index as usize == PACKET_COUNT {
++                break index;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "TX descriptors were not completed; used index={index}"
++            );
++            std::thread::yield_now();
++        };
++        assert_eq!(used_index as usize, PACKET_COUNT);
++
++        let queued = target_raw_queue.read().unwrap();
++        let queued_payload_bytes: usize =
++            queued.iter().map(|raw_packet| raw_packet.data.len()).sum();
++        assert_eq!(queued.len(), PACKET_COUNT);
++        assert_eq!(queued_payload_bytes, PACKET_COUNT * PAYLOAD_SIZE);
++
++        eprintln!(
++            "VSOCK_GUEST_TX_QUEUE packets={} payload_each={} queued_packets={} queued_payload_bytes={} tx_used_index={} receiver_drained=false",
++            PACKET_COUNT,
++            PAYLOAD_SIZE,
++            queued.len(),
++            queued_payload_bytes,
++            used_index
++        );
++
++        drop(queued);
++        test_dir.close().unwrap();
++    }
+ }
