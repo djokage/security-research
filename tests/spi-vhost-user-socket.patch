@@ -1,0 +1,294 @@
+diff --git a/vhost-device-spi/Cargo.toml b/vhost-device-spi/Cargo.toml
+index 0000000..0000000 100644
+--- a/vhost-device-spi/Cargo.toml
++++ b/vhost-device-spi/Cargo.toml
+@@ -28,6 +28,7 @@ bitflags = "2.11.1"
+ 
+ [dev-dependencies]
+ assert_matches = "1.5"
++vhost = { workspace = true, features = ["vhost-user-frontend"] }
+ virtio-queue = { workspace = true, features = ["test-utils"] }
+ vm-memory = { workspace = true, features = ["backend-mmap", "backend-atomic"] }
+ 
+diff --git a/vhost-device-spi/src/main.rs b/vhost-device-spi/src/main.rs
+index 0000000..0000000 100644
+--- a/vhost-device-spi/src/main.rs
++++ b/vhost-device-spi/src/main.rs
+@@ -183,6 +183,9 @@ fn main() {
+     }
+ }
+ 
++#[cfg(test)]
++mod socket_test;
++
+ #[cfg(test)]
+ pub(crate) mod tests {
+     use std::path::Path;
+diff --git a/vhost-device-spi/src/socket_test.rs b/vhost-device-spi/src/socket_test.rs
+new file mode 100644
+--- /dev/null
++++ b/vhost-device-spi/src/socket_test.rs
+@@ -0,0 +1,238 @@
++//! End-to-end vhost-user socket test for guest-controlled SPI transfer sizes.
++
++use std::{
++    ffi::CString,
++    fs::File,
++    os::fd::{AsRawFd, FromRawFd},
++    os::unix::fs::FileExt,
++    path::PathBuf,
++    ptr,
++    sync::{Arc, RwLock},
++    thread,
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
++
++use vhost::{
++    vhost_user::{
++        message::VhostUserProtocolFeatures,
++        Frontend, VhostUserFrontend,
++    },
++    VhostBackend, VhostUserMemoryRegionInfo, VringConfigData,
++};
++use vhost_user_backend::VhostUserDaemon;
++use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
++use vmm_sys_util::eventfd::EventFd;
++
++use crate::{
++    spi::{tests::DummyDevice, SpiController},
++    vhu_spi::{VirtioSpiConfig, VhostUserSpiBackend},
++};
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct TestVringDesc {
++    addr: u64,
++    len: u32,
++    flags: u16,
++    next: u16,
++}
++
++fn write_guest<T: Copy>(base: *mut u8, gpa: usize, value: T) {
++    // SAFETY: The caller provides a live shared mapping and a GPA range inside it.
++    unsafe { ptr::write_volatile(base.add(gpa).cast::<T>(), value) };
++}
++
++fn read_guest<T: Copy>(base: *mut u8, gpa: usize) -> T {
++    // SAFETY: The caller provides a live shared mapping and a GPA range inside it.
++    unsafe { ptr::read_volatile(base.add(gpa).cast::<T>()) }
++}
++
++fn write_guest_bytes(base: *mut u8, gpa: usize, bytes: &[u8]) {
++    // SAFETY: The caller provides a live shared mapping and a GPA range inside it.
++    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(gpa), bytes.len()) };
++}
++
++fn vm_peak_kib() -> u64 {
++    let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
++    status
++        .lines()
++        .find(|line| line.starts_with("VmPeak:"))
++        .and_then(|line| line.split_whitespace().nth(1))
++        .and_then(|value| value.parse().ok())
++        .expect("parse VmPeak")
++}
++
++#[test]
++fn real_vhost_user_socket_request_allocates_guest_sized_spi_buffers() {
++    const MEM_SIZE: usize = 64 * 1024 * 1024;
++    const TRANSFER_LEN: u32 = 16 * 1024 * 1024;
++    const DESC_TABLE: usize = 0x1000;
++    const AVAIL_RING: usize = 0x2000;
++    const USED_RING: usize = 0x3000;
++    const HEADER_GPA: usize = 0x10000;
++    const TX_GPA: usize = 0x20000;
++    const RX_GPA: usize = 0x1200000;
++    const STATUS_GPA: usize = 0x2200000;
++
++    let nonce = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_nanos();
++    let socket = std::env::temp_dir().join(format!(
++        "vhost-device-spi-socket-repro-{}-{nonce}.sock",
++        std::process::id()
++    ));
++
++    let spi = DummyDevice::open(&PathBuf::from("dummy-spi")).unwrap();
++    let controller = Arc::new(SpiController::new(spi).unwrap());
++    let backend = Arc::new(RwLock::new(VhostUserSpiBackend::new(controller).unwrap()));
++    let guest_memory = GuestMemoryAtomic::new(GuestMemoryMmap::new());
++    let mut daemon =
++        VhostUserDaemon::new("spi-socket-repro".to_string(), backend, guest_memory).unwrap();
++    let server_socket = socket.clone();
++    let server = thread::spawn(move || daemon.serve(&server_socket).unwrap());
++
++    let deadline = Instant::now() + Duration::from_secs(5);
++    while !socket.exists() && Instant::now() < deadline {
++        thread::sleep(Duration::from_millis(10));
++    }
++    assert!(socket.exists(), "SPI daemon did not create its Unix socket");
++
++    let mut frontend = Frontend::connect(&socket, 1).expect("connect vhost-user frontend");
++    frontend.set_owner().expect("VHOST_USER_SET_OWNER");
++    let offered_features = frontend.get_features().expect("VHOST_USER_GET_FEATURES");
++    // Disable EVENT_IDX so this small frontend only needs the basic split-ring layout.
++    let negotiated_features = offered_features & !(1_u64 << 29);
++    frontend
++        .set_features(negotiated_features)
++        .expect("VHOST_USER_SET_FEATURES");
++    let protocol_features = frontend
++        .get_protocol_features()
++        .expect("VHOST_USER_GET_PROTOCOL_FEATURES");
++    assert!(protocol_features.contains(VhostUserProtocolFeatures::MQ));
++    frontend
++        .set_protocol_features(protocol_features)
++        .expect("VHOST_USER_SET_PROTOCOL_FEATURES");
++
++    let memfd_name = CString::new("spi-guest-memory").unwrap();
++    // SAFETY: memfd_create receives a valid NUL-terminated name.
++    let memfd = unsafe { libc::memfd_create(memfd_name.as_ptr(), libc::MFD_CLOEXEC) };
++    assert!(memfd >= 0, "memfd_create failed");
++    // SAFETY: ownership of the newly-created descriptor is transferred to File.
++    let guest_file = unsafe { File::from_raw_fd(memfd) };
++    guest_file.set_len(MEM_SIZE as u64).unwrap();
++    // SAFETY: file is sized to MEM_SIZE and remains alive until after the mapping is unmapped.
++    let mapping = unsafe {
++        libc::mmap(
++            ptr::null_mut(),
++            MEM_SIZE,
++            libc::PROT_READ | libc::PROT_WRITE,
++            libc::MAP_SHARED,
++            guest_file.as_raw_fd(),
++            0,
++        )
++    };
++    assert_ne!(mapping, libc::MAP_FAILED, "mmap guest memory failed");
++    let guest_base = mapping.cast::<u8>();
++
++    let region = VhostUserMemoryRegionInfo {
++        guest_phys_addr: 0,
++        memory_size: MEM_SIZE as u64,
++        userspace_addr: mapping as u64,
++        mmap_offset: 0,
++        mmap_handle: guest_file.as_raw_fd(),
++    };
++    frontend
++        .set_mem_table(&[region])
++        .expect("VHOST_USER_SET_MEM_TABLE");
++
++    frontend.set_vring_num(0, 16).expect("VHOST_USER_SET_VRING_NUM");
++    frontend
++        .set_vring_addr(
++            0,
++            &VringConfigData {
++                queue_max_size: 16,
++                queue_size: 16,
++                flags: 0,
++                desc_table_addr: DESC_TABLE as u64,
++                used_ring_addr: USED_RING as u64,
++                avail_ring_addr: AVAIL_RING as u64,
++                log_addr: None,
++            },
++        )
++        .expect("VHOST_USER_SET_VRING_ADDR");
++    frontend.set_vring_base(0, 0).expect("VHOST_USER_SET_VRING_BASE");
++    let call_fd = EventFd::new(0).unwrap();
++    let kick_fd = EventFd::new(0).unwrap();
++    frontend
++        .set_vring_call(0, &call_fd)
++        .expect("VHOST_USER_SET_VRING_CALL");
++    frontend
++        .set_vring_kick(0, &kick_fd)
++        .expect("VHOST_USER_SET_VRING_KICK");
++    frontend
++        .set_vring_enable(0, true)
++        .expect("VHOST_USER_SET_VRING_ENABLE");
++
++    // Deliberately invalid chip-select makes the backend return PARAM_ERR,
++    // but only after it has created the TX and RX vectors.
++    let mut header = [0_u8; 32];
++    header[0] = 0xff; // chip_select_id: unsupported
++    header[1] = 8; // bits_per_word
++    header[3] = 1; // tx_nbits
++    header[4] = 1; // rx_nbits
++    header[12..16].copy_from_slice(&10_000_u32.to_le_bytes()); // freq
++    write_guest_bytes(guest_base, HEADER_GPA, &header);
++
++    let descriptors = [
++        TestVringDesc {
++            addr: HEADER_GPA as u64,
++            len: 32,
++            flags: 1,
++            next: 1,
++        },
++        TestVringDesc {
++            addr: TX_GPA as u64,
++            len: TRANSFER_LEN,
++            flags: 1,
++            next: 2,
++        },
++        TestVringDesc {
++            addr: RX_GPA as u64,
++            len: TRANSFER_LEN,
++            flags: 3,
++            next: 3,
++        },
++        TestVringDesc {
++            addr: STATUS_GPA as u64,
++            len: 1,
++            flags: 2,
++            next: 0,
++        },
++    ];
++    for (index, descriptor) in descriptors.iter().enumerate() {
++        write_guest(
++            guest_base,
++            DESC_TABLE + index * std::mem::size_of::<TestVringDesc>(),
++            *descriptor,
++        );
++    }
++
++    // One available descriptor chain, beginning at descriptor zero.
++    write_guest(guest_base, AVAIL_RING, 0_u16);
++    write_guest(guest_base, AVAIL_RING + 2, 1_u16);
++    write_guest(guest_base, AVAIL_RING + 4, 0_u16);
++    write_guest(guest_base, USED_RING, 0_u16);
++    write_guest(guest_base, USED_RING + 2, 0_u16);
++
++    let peak_before = vm_peak_kib();
++    kick_fd.write(1).expect("kick vhost-user queue");
++
++    let completion_deadline = Instant::now() + Duration::from_secs(10);
++    let mut used_index = 0_u16;
++    while Instant::now() < completion_deadline {
++        used_index = read_guest(guest_base, USED_RING + 2);
++        if used_index == 1 {
++            break;
++        }
++        thread::sleep(Duration::from_millis(10));
++    }
++    assert_eq!(used_index, 1, "backend did not consume the guest request");
++
++    let status: u8 = read_guest(guest_base, STATUS_GPA);
++    let peak_after = vm_peak_kib();
++    let peak_delta_kib = peak_after.saturating_sub(peak_before);
++    eprintln!(
++        "REAL VHOST-USER SOCKET REPRO: tx={} bytes; rx={} bytes; expected vector allocation={} bytes; VmPeak delta={} KiB; response_status={}",
++        TRANSFER_LEN,
++        TRANSFER_LEN,
++        2_u64 * TRANSFER_LEN as u64,
++        peak_delta_kib,
++        status
++    );
++    assert_eq!(status, 1, "expected VirtIO-SPI PARAM_ERR response");
++    assert!(
++        peak_delta_kib >= (2_u64 * TRANSFER_LEN as u64 / 1024 * 3 / 4),
++        "expected guest-sized TX+RX allocations to raise VmPeak; observed {peak_delta_kib} KiB"
++    );
++
++    drop(frontend);
++    server.join().expect("join vhost-user daemon");
++    // SAFETY: mapping was created above with this exact address and length.
++    unsafe { libc::munmap(mapping, MEM_SIZE) };
++}
