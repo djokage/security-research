@@ -267,6 +267,7 @@ new file mode 100644
 +        }
 +        thread::sleep(Duration::from_millis(10));
 +    }
++    }
 +    assert_eq!(used_index, 1, "backend did not consume the guest request");
 +
 +    let status: u8 = read_guest(guest_base, STATUS_GPA);
