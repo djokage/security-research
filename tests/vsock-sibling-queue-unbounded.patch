@@ -309,7 +309,7 @@ new file mode 100644
 +    Queue, QueueT,
 +};
 +use virtio_vsock::packet::{VsockPacket, PKT_HEADER_SIZE};
-+use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryMmap};
++use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 +use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
 +
 +const QUEUE_SIZE: u16 = 1024;
@@ -498,9 +498,9 @@ new file mode 100644
 +            queue_max_size: QUEUE_SIZE,
 +            queue_size: QUEUE_SIZE,
 +            flags: 0,
-+            desc_table_addr: queue.desc_table().raw_value(),
-+            used_ring_addr: queue.used_ring().raw_value(),
-+            avail_ring_addr: queue.avail_ring().raw_value(),
++            desc_table_addr: queue.desc_table(),
++            used_ring_addr: queue.used_ring(),
++            avail_ring_addr: queue.avail_ring(),
 +            log_addr: None,
 +        };
 +        frontend
@@ -551,7 +551,7 @@ new file mode 100644
 +}
 +
 +fn wait_for_used(memory: &GuestMemoryMmap, queue: &Queue, expected: u16, what: &str) {
-+    let used_index = GuestAddress(queue.used_ring().raw_value() + 2);
++    let used_index = GuestAddress(queue.used_ring() + 2);
 +    let deadline = Instant::now() + Duration::from_secs(10);
 +    loop {
 +        let value: u16 = memory.read_obj(used_index).expect("read used-ring index");
@@ -636,7 +636,7 @@ new file mode 100644
 +    );
 +
 +    let target_used_before: u16 = target_memory
-+        .read_obj(GuestAddress(target.queues[0].used_ring().raw_value() + 2))
++        .read_obj(GuestAddress(target.queues[0].used_ring() + 2))
 +        .expect("read target RX used index");
 +    assert_eq!(
 +        target_used_before, 0,
@@ -649,7 +649,7 @@ new file mode 100644
 +    target_memory
 +        .write_obj(
 +            PACKET_COUNT as u16,
-+            GuestAddress(target.queues[0].avail_ring().raw_value() + 2),
++            GuestAddress(target.queues[0].avail_ring() + 2),
 +        )
 +        .expect("publish target RX descriptors");
 +    target.kicks[0].write(1).expect("kick target RX queue");
