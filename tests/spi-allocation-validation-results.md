@@ -4,45 +4,70 @@ Tested upstream revision: `rust-vmm/vhost-device@0484a75df5c8e77a708af10b24dd34f
 
 Research branch: `spi-allocation-validation`
 
-Successful GitHub Actions run: https://github.com/djokage/security-research/actions/runs/43461679472
+## Backend-level reproduction
 
-## Runtime results
+Successful backend-level run: https://github.com/djokage/security-research/actions/runs/43461679472
 
-The workflow built `vhost-device-spi`, ran its existing unit tests, applied the local test patch, and ran three bounded reproductions.
+The workflow built `vhost-device-spi`, ran its existing tests, applied the local test patch, and ran three bounded tests against the actual SPI backend queue handler.
 
 - Existing SPI backend tests: 9 passed, 0 failed.
 - One 32 MiB transfer with invalid transfer parameters:
-  - Expected TX + RX allocation: 67,108,864 bytes.
+  - Expected TX + RX vector allocation: 67,108,864 bytes.
   - Observed `VmPeak` increase: 65,544 KiB.
-  - The request returned `ParamErr`.
+  - The backend returned `ParamErr`.
 - Four 16 MiB requests in one guest descriptor queue:
-  - Expected TX + RX allocation: 134,217,728 bytes.
+  - Expected combined TX + RX vector allocation: 134,217,728 bytes.
   - Observed `VmPeak` increase: 131,104 KiB.
   - All four requests returned `ParamErr`.
-  - Observed `VmHWM` increase: 65,504 KiB. This is resident high-water memory, not the total virtual allocation.
+  - Observed `VmHWM` increase: 65,348 KiB.
 - Two independently-created backend instances processed valid 32 MiB transfers concurrently:
-  - Expected combined TX + RX allocation: 134,217,728 bytes.
-  - Observed `VmHWM` increase: 193,928 KiB.
-  - Both requests completed with `TransOk`.
+  - Expected combined TX + RX vector allocation: 134,217,728 bytes.
+  - Observed process `VmHWM` increase: 195,104 KiB.
+  - Both requests returned `TransOk`.
 
-The test patch is in [spi-allocation-order.patch](spi-allocation-order.patch).
+These tests call `process_queue()` directly with constructed VirtIO descriptor chains. The memory figures are Linux process peak metrics; `VmPeak` is virtual memory peak and `VmHWM` is resident-set high-water mark. They are measurements from the test process, not a demonstration of a host OOM event.
+
+The backend test patch is in [spi-allocation-order.patch](spi-allocation-order.patch).
+
+## Real vhost-user socket attempt
+
+Socket-level test patch: [spi-vhost-user-socket.patch](spi-vhost-user-socket.patch)
+
+Latest socket-test workflow run: https://github.com/djokage/security-research/actions/runs/43465426954
+
+The test starts a `VhostUserDaemon`, connects a vhost-user frontend over a Unix-domain socket, negotiates features, creates shared guest memory with a memfd, configures the virtqueue, and attempts to submit an SPI descriptor chain containing 16 MiB TX and RX buffers.
+
+The test did **not** reach the SPI request handler. The daemon thread failed while handling the memory table with:
+
+```text
+HandleRequest(ReqHandlerError(Custom { kind: Other, error: MissingMemoryMapping }))
+```
+
+The test then timed out waiting for the used-ring index to advance; it remained zero. Consequently, there is no socket-level allocation measurement and no successful guest-to-daemon reproduction yet.
 
 ## Source path
 
-In `vhost-device-spi/src/vhu_spi.rs`, the request handler constructs TX and RX vectors from guest descriptor lengths before `check_trans_params()` is called. `check_trans_params()` validates SPI parameters but does not impose a maximum transfer length.
+In `vhost-device-spi/src/vhu_spi.rs`, `process_requests()` constructs TX and RX vectors from guest descriptor lengths before calling `check_trans_params()`. The parameter checks validate fields such as chip select, bits per word, transfer mode and bus widths, but do not impose a transfer-length limit.
 
-In `vhost-device-spi/src/main.rs`, `socket_count` creates one thread per configured guest socket. Each thread calls `start_backend_server()`, which opens a device, creates a controller and backend, and serves a vhost-user daemon. Thus the implementation creates multiple backend contexts inside the same host process when multiple sockets are configured.
+In `vhost-device-spi/src/main.rs`, `socket_count` starts one thread and backend server per configured guest socket. These backend instances run within the same daemon process.
 
-## What this establishes
+## What is established
 
-The tests demonstrate that guest descriptor lengths drive large host allocations before SPI parameter validation, that multiple requests in one queue scale those allocations, and that two independent backend contexts can hold large allocations concurrently in the same test process.
+- The request handler allocates TX/RX vectors based on descriptor lengths.
+- Those allocations happen before SPI parameter validation.
+- The direct backend-level tests measured large increases in process memory metrics for large descriptor lengths.
+- Multiple requests and two backend instances can increase memory use concurrently in the test process.
+- The multi-socket server code creates separate backend contexts in one process.
 
-## What this does not establish
+## What is not established
 
-The test does not start real guest VMs or exchange descriptors over actual vhost-user Unix sockets. The two-context test calls the backend queue handler directly in two threads, using a synchronized dummy SPI device. It therefore demonstrates concurrent backend memory consumption, not a complete deployed cross-tenant exploit.
-
-It also does not exhaust host memory, measure an OOM kill, or demonstrate effects on unrelated host processes. The 32 MiB and 16 MiB sizes are bounded test inputs, not a claim that every deployment accepts those exact sizes under every memory configuration.
+- The attempted vhost-user socket test did not successfully install the guest-memory mapping, so it did not exercise the request path through the socket.
+- No real guest VM was started.
+- No host memory exhaustion, OOM kill, unrelated service outage, or production cross-tenant impact was demonstrated.
+- The bounded test sizes do not establish what every deployment will accept under its own memory and descriptor constraints.
 
 ## Assessment
 
-This is a runtime-confirmed guest-descriptor-controlled allocation defect in the tested backend path, with a demonstrated memory-consumption impact. The multi-socket source structure and concurrent backend test support a shared-process resource-exhaustion concern. A full socket/VM-level test is still needed before claiming end-to-end cross-tenant exploitation or a specific production denial-of-service outcome.
+The source defect and backend-level memory-consumption behavior are reproduced. This supports a host memory-exhaustion vulnerability candidate.
+
+The end-to-end guest-to-daemon path remains unverified because the current socket test fails during guest-memory mapping setup. Cross-tenant denial of service and a specific production outage should not be claimed as demonstrated until that path is working and tested.
