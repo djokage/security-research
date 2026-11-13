@@ -54,7 +54,7 @@ new file mode 100644
 +use vmm_sys_util::eventfd::EventFd;
 +
 +use crate::{
-+    spi::{tests::DummyDevice, SpiController},
++    spi::{tests::DummyDevice, SpiController, SpiDevice},
 +    vhu_spi::VhostUserSpiBackend,
 +};
 +
