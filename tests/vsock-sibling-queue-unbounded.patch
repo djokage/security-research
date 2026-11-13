@@ -11,10 +11,10 @@ diff --git a/vhost-device-vsock/src/thread_backend.rs b/vhost-device-vsock/src/t
 +        const SOURCE_CID: u64 = 30;
 +        const TARGET_CID: u64 = 31;
 +        const PACKET_COUNT: usize = 2048;
-+        const PAYLOAD_SIZE: usize = CONN_TX_BUF_SIZE as usize;
++        const PAYLOAD_SIZE: usize = 64 * 1024;
 +        const SHARED_GROUP: &str = "default";
 +
-+        let test_dir = tempdir().expect("Could not create a temporary directory");
++        let test_dir = tempfile::tempdir().expect("Could not create a temporary directory");
 +        let cid_map: Arc<RwLock<CidMap>> = Arc::new(RwLock::new(HashMap::new()));
 +
 +        let target_config = VsockConfig::new(
@@ -109,7 +109,6 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 @@ -1152,3 +1152,159 @@
          t.process_backend_evt(EventSet::empty());
      }
- }
 +
 +    #[test]
 +    fn test_sibling_queue_via_guest_tx_vring() {
@@ -236,7 +235,7 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        let used_index_addr = queue.used_ring().unchecked_add(2);
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        let used_index = loop {
-+            let index: u16 = mem_handle.read_obj(used_index_addr).unwrap();
++            let index: u16 = mem_handle.read_obj(GuestAddress(used_index_addr)).unwrap();
 +            if index as usize == PACKET_COUNT {
 +                break index;
 +            }
