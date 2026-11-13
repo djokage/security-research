@@ -35,8 +35,7 @@ new file mode 100644
 +    ffi::CString,
 +    fs::File,
 +    os::fd::{AsRawFd, FromRawFd},
-+    os::unix::fs::FileExt,
-+    path::PathBuf,
+++    path::PathBuf,
 +    ptr,
 +    sync::{Arc, RwLock},
 +    thread,
@@ -56,7 +55,7 @@ new file mode 100644
 +
 +use crate::{
 +    spi::{tests::DummyDevice, SpiController},
-+    vhu_spi::{VirtioSpiConfig, VhostUserSpiBackend},
++    vhu_spi::VhostUserSpiBackend,
 +};
 +
 +#[repr(C)]
