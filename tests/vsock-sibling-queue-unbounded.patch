@@ -312,7 +312,7 @@ new file mode 100644
 +
 +const QUEUE_SIZE: u16 = 1024;
 +const MEMORY_SIZE: usize = 64 * 1024 * 1024;
-+const PACKET_COUNT: usize = 511;
++const PACKET_COUNT: usize = 505;
 +const PAYLOAD_SIZE: usize = 64 * 1024;
 +const SOURCE_CID: u64 = 40;
 +const TARGET_CID: u64 = 41;
