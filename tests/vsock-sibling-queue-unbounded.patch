@@ -232,10 +232,10 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        source.process_tx(&vring, false).unwrap();
 +
 +        // The backend returns used descriptors from its worker thread.
-+        let used_index_addr = queue.used_ring().unchecked_add(2);
++        let used_index_addr = unsafe { queue.used_ring().unchecked_add(2) };
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        let used_index = loop {
-+            let index: u16 = mem_handle.read_obj(GuestAddress(used_index_addr)).unwrap();
++            let index: u16 = mem_handle.read_obj(used_index_addr).unwrap();
 +            if index as usize == PACKET_COUNT {
 +                break index;
 +            }
