@@ -280,7 +280,7 @@ diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-de
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,395 @@
 +use std::{
 +    path::Path,
 +    process::{Child, Command, Stdio},
@@ -496,9 +496,12 @@ new file mode 100644
 +            queue_max_size: QUEUE_SIZE,
 +            queue_size: QUEUE_SIZE,
 +            flags: 0,
-+            desc_table_addr: queue.desc_table(),
-+            used_ring_addr: queue.used_ring(),
-+            avail_ring_addr: queue.avail_ring(),
++            desc_table_addr: region_info.userspace_addr
++                + (queue.desc_table() - region_info.guest_phys_addr),
++            used_ring_addr: region_info.userspace_addr
++                + (queue.used_ring() - region_info.guest_phys_addr),
++            avail_ring_addr: region_info.userspace_addr
++                + (queue.avail_ring() - region_info.guest_phys_addr),
 +            log_addr: None,
 +        };
 +        frontend
