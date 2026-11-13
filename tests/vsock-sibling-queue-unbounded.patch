@@ -280,7 +280,7 @@ diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-de
 new file mode 100644
 --- /dev/null
 +++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,415 @@
 +use std::{
 +    path::Path,
 +    process::{Child, Command, Stdio},
@@ -338,7 +338,7 @@ new file mode 100644
 +}
 +
 +struct ConfiguredFrontend {
-+    frontend: Frontend,
++    _frontend: Frontend,
 +    queues: Vec<Queue>,
 +    kicks: Vec<EventFd>,
 +    _calls: Vec<EventFd>,
@@ -429,7 +429,7 @@ new file mode 100644
 +) -> Vec<Queue> {
 +    let mut queues = Vec::with_capacity(3);
 +    for (index, base) in RING_BASES.iter().enumerate() {
-+        let mut mock = MockSplitQueue::create(memory, GuestAddress(*base), QUEUE_SIZE);
++        let mock = MockSplitQueue::create(memory, GuestAddress(*base), QUEUE_SIZE);
 +        if let Some((target_index, descriptors)) = populated_queue {
 +            if target_index == index {
 +                mock.build_multiple_desc_chains(descriptors)
@@ -530,7 +530,7 @@ new file mode 100644
 +    }
 +
 +    ConfiguredFrontend {
-+        frontend,
++        _frontend: frontend,
 +        queues,
 +        kicks,
 +        _calls: calls,
@@ -622,7 +622,7 @@ new file mode 100644
 +        )
 +        .expect("hold target RX descriptors");
 +
-+    let mut source = configure_frontend(&source_control, &source_memory, source_queues);
++    let source = configure_frontend(&source_control, &source_memory, source_queues);
 +    let target = configure_frontend(&target_control, &target_memory, target_queues);
 +
 +    // Both daemon-side devices are now activated. Publish the source TX chains
@@ -669,19 +669,25 @@ new file mode 100644
 +        "target RX delivery",
 +    );
 +
-+    let mut received = vec![0u8; PAYLOAD_SIZE];
-+    target_memory
-+        .read_slice(&mut received, GuestAddress(DATA_BASE + PKT_HEADER_SIZE as u64))
-+        .expect("read first received VSOCK payload");
-+    assert!(
-+        received.iter().all(|byte| *byte == PAYLOAD_BYTE),
-+        "received payload did not match the guest TX data"
-+    );
++    for packet_index in 0..PACKET_COUNT {
++        let payload_addr = DATA_BASE
++            + packet_index as u64 * (PKT_HEADER_SIZE + PAYLOAD_SIZE) as u64
++            + PKT_HEADER_SIZE as u64;
++        let mut received = vec![0u8; PAYLOAD_SIZE];
++        target_memory
++            .read_slice(&mut received, GuestAddress(payload_addr))
++            .expect("read received VSOCK payload");
++        assert!(
++            received.iter().all(|byte| *byte == PAYLOAD_BYTE),
++            "received payload {packet_index} did not match the guest TX data"
++        );
++    }
 +
 +    eprintln!(
-+        "VSOCK_VHOST_USER_E2E packets={} payload_each={} tx_used_index={} rx_used_index={} receiver_initial_rx_buffers=0 delayed_rx_delivery=verified",
++        "VSOCK_VHOST_USER_E2E packets={} payload_each={} verified_payload_bytes={} tx_used_index={} rx_used_index={} receiver_initial_rx_buffers=0 delayed_rx_delivery=verified",
 +        PACKET_COUNT,
 +        PAYLOAD_SIZE,
++        PACKET_COUNT * PAYLOAD_SIZE,
 +        PACKET_COUNT,
 +        PACKET_COUNT
 +    );
