@@ -283,15 +283,14 @@ new file mode 100644
 @@ -0,0 +1,402 @@
 +use std::{
 +    fs::OpenOptions,
-+    os::unix::process::ExitStatusExt,
-+    path::{Path, PathBuf},
++    path::Path,
 +    process::{Child, Command, Stdio},
 +    thread,
 +    time::{Duration, Instant},
 +};
 +
 +use vhost::{
-+    backend::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData},
++    VhostBackend, VhostUserMemoryRegionInfo, VringConfigData,
 +    vhost_user::{
 +        message::{
 +            VhostUserConfigFlags, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
@@ -618,7 +617,7 @@ new file mode 100644
 +    target_memory
 +        .write_obj(
 +            0u16,
-+            GuestAddress(target_queues[0].avail_ring().raw_value() + 2),
++            GuestAddress(target_queues[0].avail_ring() + 2),
 +        )
 +        .expect("hide target RX descriptors");
 +
