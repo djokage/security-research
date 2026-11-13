@@ -7,6 +7,7 @@ on:
       - spi-allocation-validation
     paths:
       - ".github/workflows/spi-allocation-validation.yml"
+      - "tests/spi-allocation-order.patch"
 
 permissions:
   contents: read
