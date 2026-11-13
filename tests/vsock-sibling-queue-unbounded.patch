@@ -266,3 +266,420 @@ diff --git a/vhost-device-vsock/src/vhu_vsock_thread.rs b/vhost-device-vsock/src
 +        test_dir.close().unwrap();
 +    }
 
+
+diff --git a/vhost-device-vsock/Cargo.toml b/vhost-device-vsock/Cargo.toml
+--- a/vhost-device-vsock/Cargo.toml
++++ b/vhost-device-vsock/Cargo.toml
+@@ -36,4 +36,5 @@
+ [dev-dependencies]
+ assert_matches = "1.5"
++vhost = { workspace = true, features = ["vhost-user-frontend"] }
+ virtio-queue = { workspace = true, features = ["test-utils"] }
+ tempfile = "3.27.0"
+diff --git a/vhost-device-vsock/tests/vsock_vhost_user_integration.rs b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
+new file mode 100644
+--- /dev/null
++++ b/vhost-device-vsock/tests/vsock_vhost_user_integration.rs
+@@ -0,0 +1,402 @@
++use std::{
++    fs::OpenOptions,
++    os::unix::process::ExitStatusExt,
++    path::{Path, PathBuf},
++    process::{Child, Command, Stdio},
++    thread,
++    time::{Duration, Instant},
++};
++
++use vhost::{
++    backend::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData},
++    vhost_user::{
++        message::{
++            VhostUserConfigFlags, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
++        },
++        Frontend, VhostUserFrontend,
++    },
++};
++use virtio_bindings::bindings::{
++    virtio_config::VIRTIO_F_VERSION_1,
++    virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE},
++};
++use virtio_queue::{
++    desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
++    mock::MockSplitQueue,
++    Queue, QueueT,
++};
++use virtio_vsock::packet::{VsockPacket, PKT_HEADER_SIZE};
++use vm_memory::{Bytes, FileOffset, GuestAddress, GuestMemoryMmap};
++use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
++
++const QUEUE_SIZE: u16 = 1024;
++const MEMORY_SIZE: usize = 64 * 1024 * 1024;
++const PACKET_COUNT: usize = 511;
++const PAYLOAD_SIZE: usize = 64 * 1024;
++const SOURCE_CID: u64 = 40;
++const TARGET_CID: u64 = 41;
++const VSOCK_TYPE_STREAM: u16 = 1;
++const VSOCK_OP_RW: u16 = 5;
++const PAYLOAD_BYTE: u8 = 0x5a;
++const RING_BASES: [u64; 3] = [0x1000, 0x11000, 0x21000];
++const DATA_BASE: u64 = 0x100000;
++
++struct DaemonChild(Child);
++
++impl DaemonChild {
++    fn terminate(&mut self) {
++        let _ = self.0.kill();
++        let _ = self.0.wait();
++    }
++}
++
++impl Drop for DaemonChild {
++    fn drop(&mut self) {
++        self.terminate();
++    }
++}
++
++struct ConfiguredFrontend {
++    frontend: Frontend,
++    queues: Vec<Queue>,
++    kicks: Vec<EventFd>,
++    _calls: Vec<EventFd>,
++}
++
++fn create_guest_memory() -> GuestMemoryMmap {
++    let file = tempfile::tempfile().expect("create guest RAM backing file");
++    file.set_len(MEMORY_SIZE as u64).expect("size guest RAM backing file");
++    GuestMemoryMmap::<()>::from_ranges_with_files(&[(
++        GuestAddress(0),
++        MEMORY_SIZE,
++        Some(FileOffset::new(file, 0)),
++    )])
++    .expect("map guest RAM")
++}
++
++fn make_packet_header() -> Vec<u8> {
++    let mut storage = vec![0u8; PKT_HEADER_SIZE + PAYLOAD_SIZE];
++    let (header, data) = storage.split_at_mut(PKT_HEADER_SIZE);
++    // SAFETY: header and data are disjoint buffers of the lengths required by VsockPacket.
++    let mut packet = unsafe { VsockPacket::new(header, Some(data)).unwrap() };
++    packet
++        .set_type(VSOCK_TYPE_STREAM)
++        .set_src_cid(SOURCE_CID)
++        .set_dst_cid(TARGET_CID)
++        .set_src_port(9000)
++        .set_dst_port(1234)
++        .set_op(VSOCK_OP_RW)
++        .set_len(PAYLOAD_SIZE as u32);
++    let mut result = vec![0u8; PKT_HEADER_SIZE];
++    packet.header_slice().copy_to(&mut result);
++    result
++}
++
++fn make_packet_descriptors(
++    memory: &GuestMemoryMmap,
++    packet_count: usize,
++    writable: bool,
++) -> Vec<RawDescriptor> {
++    let header = make_packet_header();
++    let payload = vec![PAYLOAD_BYTE; PAYLOAD_SIZE];
++    let mut next_addr = DATA_BASE;
++    let mut descriptors = Vec::with_capacity(packet_count * 2);
++
++    for packet_index in 0..packet_count {
++        let header_addr = next_addr;
++        let data_addr = header_addr + PKT_HEADER_SIZE as u64;
++        memory
++            .write(&header, GuestAddress(header_addr))
++            .expect("write VSOCK header into guest RAM");
++
++        if writable {
++            memory
++                .write(&vec![0u8; PAYLOAD_SIZE], GuestAddress(data_addr))
++                .expect("initialize writable RX payload buffer");
++        } else {
++            memory
++                .write(&payload, GuestAddress(data_addr))
++                .expect("write TX payload into guest RAM");
++        }
++
++        let head_index = (packet_index * 2) as u16;
++        let first_flags = VRING_DESC_F_NEXT as u16
++            | if writable { VRING_DESC_F_WRITE as u16 } else { 0 };
++        let second_flags = if writable { VRING_DESC_F_WRITE as u16 } else { 0 };
++
++        descriptors.push(RawDescriptor::from(SplitDescriptor::new(
++            header_addr,
++            PKT_HEADER_SIZE as u32,
++            first_flags,
++            head_index + 1,
++        )));
++        descriptors.push(RawDescriptor::from(SplitDescriptor::new(
++            data_addr,
++            PAYLOAD_SIZE as u32,
++            second_flags,
++            0,
++        )));
++        next_addr = data_addr + PAYLOAD_SIZE as u64;
++    }
++
++    descriptors
++}
++
++fn create_queues(
++    memory: &GuestMemoryMmap,
++    populated_queue: Option<(usize, &[RawDescriptor])>,
++) -> Vec<Queue> {
++    let mut queues = Vec::with_capacity(3);
++    for (index, base) in RING_BASES.iter().enumerate() {
++        let mut mock = MockSplitQueue::create(memory, GuestAddress(*base), QUEUE_SIZE);
++        if let Some((target_index, descriptors)) = populated_queue {
++            if target_index == index {
++                mock.build_multiple_desc_chains(descriptors)
++                    .expect("build descriptor chains");
++            }
++        }
++        queues.push(mock.create_queue().expect("create split virtqueue"));
++    }
++    queues
++}
++
++fn configure_frontend(
++    socket: &Path,
++    memory: &GuestMemoryMmap,
++    queues: Vec<Queue>,
++) -> ConfiguredFrontend {
++    let mut frontend = Frontend::connect(socket, 3).expect("connect vhost-user frontend");
++    frontend.set_owner().expect("set vhost-user owner");
++
++    let features = frontend.get_features().expect("get virtio features");
++    let required_features = (1u64 << VIRTIO_F_VERSION_1)
++        | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
++    assert_eq!(
++        features & required_features,
++        required_features,
++        "backend does not expose the required vhost-user features"
++    );
++    frontend
++        .set_features(required_features)
++        .expect("negotiate virtio features");
++
++    let available_protocol = frontend
++        .get_protocol_features()
++        .expect("get vhost-user protocol features");
++    let required_protocol =
++        VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::CONFIG;
++    assert!(
++        available_protocol.contains(required_protocol),
++        "backend lacks MQ or CONFIG protocol feature"
++    );
++    frontend
++        .set_protocol_features(required_protocol)
++        .expect("negotiate vhost-user protocol features");
++    assert_eq!(frontend.get_queue_num().expect("get queue count"), 3);
++
++    let region = memory.iter().next().expect("guest RAM region");
++    let region_info =
++        VhostUserMemoryRegionInfo::from_guest_region(region).expect("describe guest RAM");
++    frontend
++        .set_mem_table(&[region_info])
++        .expect("share guest RAM with vhost-user backend");
++
++    frontend
++        .get_config(0, 8, VhostUserConfigFlags::empty(), &[0u8; 8])
++        .expect("read VSOCK config and activate backend");
++
++    let mut calls = Vec::with_capacity(3);
++    let mut kicks = Vec::with_capacity(3);
++    for (index, queue) in queues.iter().enumerate() {
++        frontend
++            .set_vring_num(index, QUEUE_SIZE)
++            .expect("set virtqueue size");
++        let config = VringConfigData {
++            queue_max_size: QUEUE_SIZE,
++            queue_size: QUEUE_SIZE,
++            flags: 0,
++            desc_table_addr: queue.desc_table().raw_value(),
++            used_ring_addr: queue.used_ring().raw_value(),
++            avail_ring_addr: queue.avail_ring().raw_value(),
++            log_addr: None,
++        };
++        frontend
++            .set_vring_addr(index, &config)
++            .expect("set virtqueue addresses");
++        frontend
++            .set_vring_base(index, 0)
++            .expect("set virtqueue base");
++
++        let call = EventFd::new(EFD_NONBLOCK).expect("create call eventfd");
++        let kick = EventFd::new(EFD_NONBLOCK).expect("create kick eventfd");
++        frontend
++            .set_vring_call(index, &call)
++            .expect("register call eventfd");
++        frontend
++            .set_vring_kick(index, &kick)
++            .expect("register kick eventfd");
++        calls.push(call);
++        kicks.push(kick);
++    }
++
++    for index in 0..3 {
++        frontend
++            .set_vring_enable(index, true)
++            .expect("enable virtqueue");
++    }
++
++    ConfiguredFrontend {
++        frontend,
++        queues,
++        kicks,
++        _calls: calls,
++    }
++}
++
++fn wait_for_socket(path: &Path, child: &mut Child) {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    loop {
++        if let Some(status) = child.try_wait().expect("check daemon process") {
++            panic!("vhost-device-vsock daemon exited early: {status}");
++        }
++        if path.exists() {
++            return;
++        }
++        assert!(Instant::now() < deadline, "daemon did not create socket {path:?}");
++        thread::sleep(Duration::from_millis(20));
++    }
++}
++
++fn wait_for_used(memory: &GuestMemoryMmap, queue: &Queue, expected: u16, what: &str) {
++    let used_index = GuestAddress(queue.used_ring().raw_value() + 2);
++    let deadline = Instant::now() + Duration::from_secs(10);
++    loop {
++        let value: u16 = memory.read_obj(used_index).expect("read used-ring index");
++        if value == expected {
++            return;
++        }
++        assert!(
++            Instant::now() < deadline,
++            "{what}: expected used index {expected}, saw {value}"
++        );
++        thread::sleep(Duration::from_millis(5));
++    }
++}
++
++#[test]
++fn test_sibling_queue_over_real_vhost_user_sockets() {
++    let test_dir = tempfile::tempdir().expect("create test directory");
++    let source_control = test_dir.path().join("source-vhost.sock");
++    let target_control = test_dir.path().join("target-vhost.sock");
++    let source_uds = test_dir.path().join("source-vsock.sock");
++    let target_uds = test_dir.path().join("target-vsock.sock");
++    let daemon_log = test_dir.path().join("vhost-device-vsock.log");
++
++    let log_file = OpenOptions::new()
++        .create(true)
++        .append(true)
++        .open(&daemon_log)
++        .expect("create daemon log");
++
++    let mut child = DaemonChild(
++        Command::new(env!("CARGO_BIN_EXE_vhost-device-vsock"))
++            .arg("--vm")
++            .arg(format!(
++                "guest-cid={SOURCE_CID},socket={},uds-path={},queue-size={QUEUE_SIZE},groups=shared",
++                source_control.display(),
++                source_uds.display()
++            ))
++            .arg("--vm")
++            .arg(format!(
++                "guest-cid={TARGET_CID},socket={},uds-path={},queue-size={QUEUE_SIZE},groups=shared",
++                target_control.display(),
++                target_uds.display()
++            ))
++            .stdout(Stdio::from(log_file.try_clone().unwrap()))
++            .stderr(Stdio::from(log_file))
++            .spawn()
++            .expect("start real vhost-device-vsock daemon"),
++    );
++
++    wait_for_socket(&source_control, &mut child.0);
++    wait_for_socket(&target_control, &mut child.0);
++
++    let source_memory = create_guest_memory();
++    let target_memory = create_guest_memory();
++
++    let source_tx = make_packet_descriptors(&source_memory, PACKET_COUNT, false);
++    let source_queues = create_queues(&source_memory, Some((1, &source_tx)));
++    let target_rx = make_packet_descriptors(&target_memory, PACKET_COUNT, true);
++    let target_queues = create_queues(&target_memory, Some((0, &target_rx)));
++
++    // Hide the already prepared RX descriptor chains until after the sender has
++    // completed its TX requests. The descriptors exist in guest RAM but are not
++    // available to the backend while avail.idx is zero.
++    target_memory
++        .write_obj(
++            0u16,
++            GuestAddress(target_queues[0].avail_ring().raw_value() + 2),
++        )
++        .expect("hide target RX descriptors");
++
++    let mut source = configure_frontend(&source_control, &source_memory, source_queues);
++    let target = configure_frontend(&target_control, &target_memory, target_queues);
++
++    // A TX kick enters the actual vhost-user backend event loop. The sender's
++    // TX descriptors complete although the receiver has no available RX buffers.
++    source.kicks[1].write(1).expect("kick source TX queue");
++    wait_for_used(
++        &source_memory,
++        &source.queues[1],
++        PACKET_COUNT as u16,
++        "source TX completion",
++    );
++
++    let target_used_before: u16 = target_memory
++        .read_obj(GuestAddress(target.queues[0].used_ring().raw_value() + 2))
++        .expect("read target RX used index");
++    assert_eq!(
++        target_used_before, 0,
++        "receiver must not complete RX descriptors before buffers are posted"
++    );
++
++    // Now publish the target's RX buffers and kick queue zero. If the packets
++    // were retained in the sibling queue, the daemon will copy them into these
++    // guest buffers and complete all RX descriptors.
++    target_memory
++        .write_obj(
++            PACKET_COUNT as u16,
++            GuestAddress(target.queues[0].avail_ring().raw_value() + 2),
++        )
++        .expect("publish target RX descriptors");
++    target.kicks[0].write(1).expect("kick target RX queue");
++    wait_for_used(
++        &target_memory,
++        &target.queues[0],
++        PACKET_COUNT as u16,
++        "target RX delivery",
++    );
++
++    let mut received = vec![0u8; PAYLOAD_SIZE];
++    target_memory
++        .read_slice(&mut received, GuestAddress(DATA_BASE + PKT_HEADER_SIZE as u64))
++        .expect("read first received VSOCK payload");
++    assert!(
++        received.iter().all(|byte| *byte == PAYLOAD_BYTE),
++        "received payload did not match the guest TX data"
++    );
++
++    eprintln!(
++        "VSOCK_VHOST_USER_E2E packets={} payload_each={} tx_used_index={} rx_used_index={} receiver_initial_rx_buffers=0 delayed_rx_delivery=verified",
++        PACKET_COUNT,
++        PAYLOAD_SIZE,
++        PACKET_COUNT,
++        PACKET_COUNT
++    );
++
++    drop(target);
++    drop(source);
++    child.terminate();
++    let daemon_output = std::fs::read_to_string(&daemon_log).unwrap_or_default();
++    eprintln!("vhost-device-vsock daemon log bytes={}", daemon_output.len());
++}
