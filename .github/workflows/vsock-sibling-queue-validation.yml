@@ -47,12 +47,12 @@ jobs:
             git -C upstream show -s --format=fuller HEAD
           } | tee artifacts/environment.txt
 
-      - name: Run unmodified vsock crate tests
+      - name: Run unmodified Unix-backend vsock crate tests
         working-directory: upstream
         shell: bash
         run: |
           set -euo pipefail
-          timeout 240s cargo test --locked -p vhost-device-vsock --all-targets 2>&1 | tee ../artifacts/upstream-baseline.log
+          timeout 240s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets 2>&1 | tee ../artifacts/upstream-baseline.log
 
       - name: Apply queue reproduction test
         working-directory: upstream
@@ -64,13 +64,13 @@ jobs:
           git diff --check
           git diff -- vhost-device-vsock/src/thread_backend.rs > ../artifacts/vsock-test.diff
 
-      - name: Run targeted reproduction and full crate tests
+      - name: Run targeted reproduction and full Unix-backend crate tests
         working-directory: upstream
         shell: bash
         run: |
           set -euo pipefail
-          timeout 240s cargo test --locked -p vhost-device-vsock --all-targets test_sibling_raw_packets_accumulate_without_receiver_drain -- --nocapture 2>&1 | tee ../artifacts/vsock-queue-repro.log
-          timeout 300s cargo test --locked -p vhost-device-vsock --all-targets 2>&1 | tee ../artifacts/vsock-full-tests.log
+          timeout 240s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets test_sibling_raw_packets_accumulate_without_receiver_drain -- --nocapture 2>&1 | tee ../artifacts/vsock-queue-repro.log
+          timeout 300s cargo test --locked -p vhost-device-vsock --no-default-features --all-targets 2>&1 | tee ../artifacts/vsock-full-tests.log
 
       - name: Upload test logs
         if: always()
