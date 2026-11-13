@@ -1,5 +1,5 @@
 name: SPI backend baseline validation
-# Includes a real Unix-socket vhost-user request-path reproduction.
+# Includes a real Unix-socket vhost-user request-path reproduction (compile and run checked).
 
 on:
   workflow_dispatch:
