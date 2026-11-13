@@ -1,14 +1,12 @@
 diff --git a/vhost-device-spi/src/vhu_spi.rs b/vhost-device-spi/src/vhu_spi.rs
-index 0000000..0000000 100644
 --- a/vhost-device-spi/src/vhu_spi.rs
 +++ b/vhost-device-spi/src/vhu_spi.rs
-@@
+@@ -1475,5 +1475,103 @@
          // Hit the non-loop part
          backend.set_event_idx(false);
          backend.handle_event(0, EventSet::IN, &[vring], 0).unwrap();
      }
-+
-+    #[test]
+++    #[test]
 +    fn process_requests_allocates_guest_sized_buffers_before_param_validation() {
 +        // Keep this reproduction bounded: two 32 MiB buffers (64 MiB total).
 +        const TRANSFER_LEN: u32 = 32 * 1024 * 1024;
