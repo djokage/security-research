@@ -6,6 +6,14 @@ The reports include the affected code, reproduction details and observed impact.
 
 ## Reports
 
+### [Livewire: `#[Json]` methods run before global authorization hooks](reports/livewire-global-hook-authorization-order.md)
+
+A global `ComponentHook::call()` can reject a JSON action after its method has already run, allowing side effects despite an HTTP 403 response.
+
+- Project: [livewire/livewire](https://github.com/livewire/livewire)
+- Area: PHP, Laravel, Livewire component authorization
+- Tested: Livewire 4.4.8, Laravel 13.42.0, PHP 8.4.24
+
 ### [vhost-device-gpu: bad SUBMIT_3D fence count can crash the backend](reports/vhost-device-gpu-guest-dos.md)
 
 A guest-controlled fence count causes a large host-memory allocation. The reproduction triggers a process abort in the GPU backend.
