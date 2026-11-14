@@ -1,6 +1,7 @@
 name: SCSI read-only protection validation
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - scsi-read-only-protection-validation
@@ -59,8 +60,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check ../tests/scsi-read-only-write-bypass.patch
-          git apply ../tests/scsi-read-only-write-bypass.patch
+          git apply --check --verbose ../tests/scsi-read-only-write-bypass.patch
+          git apply --verbose ../tests/scsi-read-only-write-bypass.patch
           git diff --check
           git diff --stat | tee ../artifacts/patch-stat.txt
           git diff -- vhost-device-scsi/src/scsi/emulation/tests/mod.rs > ../artifacts/scsi-test.diff
