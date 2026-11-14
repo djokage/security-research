@@ -1,0 +1,95 @@
+name: SCSI read-only protection validation
+
+on:
+  push:
+    branches:
+      - scsi-read-only-protection-validation
+    paths:
+      - ".github/workflows/scsi-read-only-protection-validation.yml"
+      - "tests/scsi-read-only-write-bypass.patch"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Test write commands with read-only protection enabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: "1"
+      UPSTREAM_REPOSITORY: https://github.com/rust-vmm/vhost-device.git
+      UPSTREAM_REVISION: 0484a75df5c8e77a708af10b24dd34f596b25084
+
+    steps:
+      - name: Check out research repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch exact upstream revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$UPSTREAM_REPOSITORY" upstream
+          git -C upstream checkout --detach "$UPSTREAM_REVISION"
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_REVISION"
+          mkdir -p artifacts
+          {
+            echo "upstream_repository=$UPSTREAM_REPOSITORY"
+            echo "upstream_revision=$(git -C upstream rev-parse HEAD)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "runner=$(uname -a)"
+            echo
+            git -C upstream show -s --format=fuller HEAD
+          } | tee artifacts/environment.txt
+
+      - name: Run SCSI crate baseline tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 300s cargo test --locked -p vhost-device-scsi --all-targets 2>&1 | tee ../artifacts/scsi-baseline.log
+
+      - name: Apply read-only bypass tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check ../tests/scsi-read-only-write-bypass.patch
+          git apply ../tests/scsi-read-only-write-bypass.patch
+          git diff --check
+          git diff --stat | tee ../artifacts/patch-stat.txt
+          git diff -- vhost-device-scsi/src/scsi/emulation/tests/mod.rs > ../artifacts/scsi-test.diff
+          git diff --name-only | tee ../artifacts/changed-files.txt
+          if git diff --name-only | grep -v '^vhost-device-scsi/src/scsi/emulation/tests/mod.rs$'; then
+            echo "Unexpected production file modification"
+            exit 1
+          fi
+
+      - name: Run targeted read-only bypass reproductions
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 300s cargo test --locked -p vhost-device-scsi test_write_10_ignores_write_protected -- --nocapture 2>&1 | tee ../artifacts/write-10-repro.log
+          timeout 300s cargo test --locked -p vhost-device-scsi test_write_same_16_ignores_write_protected -- --nocapture 2>&1 | tee ../artifacts/write-same-16-repro.log
+
+      - name: Run full SCSI crate tests with reproductions
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 300s cargo test --locked -p vhost-device-scsi --all-targets 2>&1 | tee ../artifacts/scsi-with-repros.log
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scsi-read-only-protection-validation
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
