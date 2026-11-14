@@ -1,7 +1,7 @@
 diff --git a/vhost-device-scsi/src/scsi/emulation/tests/mod.rs b/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
 --- a/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
 +++ b/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
-@@ -320,8 +320,68 @@ fn test_write_10() {
+@@ -320,8 +320,67 @@ fn test_write_10() {
              .read_exact_at(&mut buf, BlockOffset::from(5) * block_size_512())
              .expect("Reading should work");
          assert_eq!(data_out, buf);
