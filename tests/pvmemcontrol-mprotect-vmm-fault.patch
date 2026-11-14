@@ -1,0 +1,97 @@
+diff --git a/devices/src/pvmemcontrol.rs b/devices/src/pvmemcontrol.rs
+--- a/devices/src/pvmemcontrol.rs
++++ b/devices/src/pvmemcontrol.rs
+@@ -813,3 +813,93 @@ impl BusDeviceSync for PvmemcontrolBusDevice {
+         None
+     }
+ }
++
++#[cfg(test)]
++mod pvmemcontrol_security_tests {
++    use std::{
++        os::unix::process::ExitStatusExt,
++        process::Command,
++    };
++
++    use super::*;
++
++    // Exercises the real PCI BAR write path in a separate process because the
++    // expected result is that a subsequent VMM-side access faults with SIGSEGV.
++    #[test]
++    fn guest_mprotect_none_can_fault_the_vmm_guest_memory_mapping() {
++        const CHILD_ENV: &str = "CH_PVMEMCONTROL_MPROTECT_CHILD";
++
++        if std::env::var_os(CHILD_ENV).is_some() {
++            let memory = GuestMemoryAtomic::new(
++                GuestMemoryMmap::<AtomicBitmap>::from_ranges(&[
++                    (GuestAddress(0), 0x4000),
++                ])
++                .unwrap(),
++            );
++            let bus = PvmemcontrolBusDevice {
++                mem: memory.clone(),
++                dev: RwLock::new(PvmemcontrolDevice::reset()),
++            };
++
++            let command_offset = mem::offset_of!(PvmemcontrolTransport, command) as u64;
++            let write_bar = |offset: u64, data: &[u8]| {
++                BusDeviceSync::write(&bus, 0, offset, data);
++            };
++
++            // Reset, register a per-CPU request buffer at GPA 0x1000, then
++            // transition the device to Ready using its real MMIO interface.
++            write_bar(
++                command_offset,
++                &(PvmemcontrolTransportCommand::Reset as u32).to_le_bytes(),
++            );
++            write_bar(0, &0x1000u64.to_le_bytes());
++            write_bar(
++                command_offset,
++                &(PvmemcontrolTransportCommand::Register as u32).to_le_bytes(),
++            );
++            write_bar(
++                command_offset,
++                &(PvmemcontrolTransportCommand::Ready as u32).to_le_bytes(),
++            );
++
++            // The guest requests PROT_NONE for GPA 0x2000 via its registered
++            // command buffer. The range is one aligned page inside guest RAM.
++            memory
++                .memory()
++                .write_obj(
++                    PvmemcontrolReq {
++                        func_code: (FunctionCode::MprotectNone as u64).into(),
++                        addr: 0x2000u64.into(),
++                        length: 0x1000u64.into(),
++                        arg: 0u64.into(),
++                    },
++                    GuestAddress(0x1000),
++                )
++                .unwrap();
++            write_bar(command_offset, &0x8000_0000u32.to_le_bytes());
++
++            // This is a VMM-side read through the same GuestMemory mapping
++            // used by device emulation. It should fault if the guest request
++            // changed the VMM's own mapping protections.
++            let _ = memory
++                .memory()
++                .read_obj::<u64>(GuestAddress(0x2000))
++                .unwrap();
++            panic!("VMM read unexpectedly survived guest PROT_NONE request");
++        }
++
++        let status = Command::new(std::env::current_exe().unwrap())
++            .arg("--exact")
++            .arg("pvmemcontrol_security_tests::guest_mprotect_none_can_fault_the_vmm_guest_memory_mapping")
++            .arg("--nocapture")
++            .env(CHILD_ENV, "1")
++            .status()
++            .unwrap();
++
++        assert_eq!(
++            status.signal(),
++            Some(libc::SIGSEGV),
++            "expected the isolated child to fault on the VMM guest-memory read; status={status:?}"
++        );
++    }
++}
