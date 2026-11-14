@@ -1,0 +1,72 @@
+diff --git a/vhost-device-scsi/src/scsi/emulation/tests/mod.rs b/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
+--- a/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
++++ b/vhost-device-scsi/src/scsi/emulation/tests/mod.rs
+@@ -320,8 +320,68 @@ fn test_write_10() {
+             .read_exact_at(&mut buf, BlockOffset::from(5) * block_size_512())
+             .expect("Reading should work");
+         assert_eq!(data_out, buf);
+     }
+ }
+ 
++#[test]
++fn test_write_10_ignores_write_protected() {
++    let mut target = EmulatedTarget::new();
++    let mut backend = TestBackend::new();
++    let mut dev = BlockDevice::new(backend.clone());
++    dev.set_write_protected(true);
++    target.add_lun(Box::new(dev));
++
++    let data_out = [b'r'; 512];
++    do_command_in(
++        &mut target,
++        &[
++            0x2a, // WRITE (10)
++            0,
++            0, 0, 0, 5, // LBA: 5
++            0,
++            0, 1, // transfer length: 1
++            0,
++        ],
++        &data_out,
++        &[],
++    );
++
++    let mut buf = [0_u8; 512];
++    backend
++        .read_exact_at(&mut buf, BlockOffset::from(5) * block_size_512())
++        .expect("Reading should work");
++    assert_eq!(buf, data_out);
++}
++
++#[test]
++fn test_write_same_16_ignores_write_protected() {
++    let mut target = EmulatedTarget::new();
++    let mut backend = TestBackend::new();
++    let mut dev = BlockDevice::new(backend.clone());
++    dev.set_write_protected(true);
++    target.add_lun(Box::new(dev));
++
++    let data_out = [b's'; 512];
++    do_command_in(
++        &mut target,
++        &[
++            0x93, // WRITE SAME (16)
++            0,
++            0, 0, 0, 0, 0, 0, 0, 5, // LBA: 5
++            0, 0, 0, 2, // number of blocks: 2
++            0,
++            0,
++        ],
++        &data_out,
++        &[],
++    );
++
++    let mut buf = [0_u8; 512 * 2];
++    backend
++        .read_exact_at(&mut buf, BlockOffset::from(5) * block_size_512())
++        .expect("Reading should work");
++    assert_eq!(buf, [b's'; 512 * 2]);
++}
++
+ #[test]
+ fn test_write_same_16() {
