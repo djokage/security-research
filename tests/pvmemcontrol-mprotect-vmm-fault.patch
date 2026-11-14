@@ -82,7 +82,7 @@ diff --git a/devices/src/pvmemcontrol.rs b/devices/src/pvmemcontrol.rs
 +
 +        let status = Command::new(std::env::current_exe().unwrap())
 +            .arg("--exact")
-+            .arg("pvmemcontrol_security_tests::guest_mprotect_none_can_fault_the_vmm_guest_memory_mapping")
++            .arg("pvmemcontrol::pvmemcontrol_security_tests::guest_mprotect_none_can_fault_the_vmm_guest_memory_mapping")
 +            .arg("--nocapture")
 +            .env(CHILD_ENV, "1")
 +            .status()
