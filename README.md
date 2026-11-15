@@ -30,3 +30,6 @@ The backend checks only the first I2C message address and forwards later unconfi
 - Project: [rust-vmm/vhost-device](https://github.com/rust-vmm/vhost-device)
 - Area: Rust, virtio, I2C virtualization
 - Impact: guest access to unconfigured I2C slave addresses on the selected host adapter
+
+
+A standalone reproduction fixture is available at [reproducers/livewire-global-hook-json-order](reproducers/livewire-global-hook-json-order/). It includes a minimal Laravel test harness for the global-hook ordering case and authorization controls.

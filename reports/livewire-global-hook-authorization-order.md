@@ -113,3 +113,8 @@ The behavior was reproduced on Livewire 4.4.8 with Laravel Framework 13.42.0 and
 ## Expected behavior
 
 Global authorization hooks should run before a `#[Json]` method is executed. A rejected call must not enter the method body or perform its side effects.
+
+
+## Standalone reproduction
+
+A minimal Laravel/Livewire PHPUnit fixture is available in [reproducers/livewire-global-hook-json-order](../reproducers/livewire-global-hook-json-order/README.md). It isolates the global-hook ordering behavior and includes ordinary-action, inline Gate, built-in `#[Authorize]`, and administrator controls. The recorded HTTP-kernel/CSRF output remains in [the cross-user SQLite evidence file](evidence/livewire-cross-user-db-proof.txt).
