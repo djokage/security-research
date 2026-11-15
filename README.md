@@ -4,6 +4,16 @@ The reports include the affected code, reproduction details and observed impact.
 
 ## Reports
 
+### [Krayin CRM: CSV imports bypass individual record ownership checks](reports/krayin-importer-ownership-scope-bypass.md)
+
+An authenticated account with individual record visibility and the Data Transfer import permissions can use CSV imports to modify and reassign another user's leads and contacts, and delete another user's contact.
+
+- Project: [krayin/laravel-crm](https://github.com/krayin/laravel-crm)
+- Tested: Krayin CRM `v2.2.8`
+- Area: PHP, Laravel, Data Transfer importer authorization
+- Evidence: [30-assertion reproduction output](reports/evidence/krayin-importer-scope-30-assertions.txt)
+- Reproducer: [CSV importer harness](reproducers/krayin-importer-scope/)
+
 ### [Livewire: `#[Json]` methods run before global authorization hooks](reports/livewire-global-hook-authorization-order.md)
 
 A global `ComponentHook::call()` can reject a JSON action after its method has already run. The database-backed test also shows an authenticated non-admin modifying an administrator-owned record before the request returns HTTP 403.

@@ -1,0 +1,31 @@
+PASS: real Bouncer resolves individual data scope to actor user_id=11 only
+PASS: CSV upload route is independently permission-gated by the Data Transfer create ACL
+PASS: validation and execution routes are permission-gated by the Data Transfer import ACL
+PASS: Admin routes, including Data Transfer, are behind authenticated user middleware
+PASS: real settings route file registers the import controller endpoints
+PASS: ImportController does not apply record-owner checks before validation or import execution
+PASS: user role permissions and individual/group/global data scope are configured as separate controls
+PASS: Importer.php contains no Bouncer/owner-scope enforcement
+PASS: Storage.php contains no Bouncer/owner-scope enforcement
+PASS: Importer.php contains no Bouncer/owner-scope enforcement
+PASS: Storage.php contains no Bouncer/owner-scope enforcement
+PASS: victim lead owner user_id=22 is outside the actor individual scope
+PASS: real AbstractImporter CSV pipeline parses and validates one lead row
+PASS: lead CSV row is accepted into a production importer batch
+PASS: lead row validation checks that the submitted owner exists, not that it is within actor scope
+PASS: CSV import reassigns victim-owned lead #101 from user 22 to actor user 11
+PASS: CSV import changes victim-owned lead data
+PASS: lead importer records one successful update
+PASS: victim contact owner user_id=22 is outside the actor individual scope
+PASS: real AbstractImporter CSV pipeline parses and validates one person row
+PASS: person CSV row is accepted into a production importer batch
+PASS: person row validation checks that the submitted owner exists, not that it is within actor scope
+PASS: CSV import reassigns victim-owned contact #202 from user 22 to actor user 11
+PASS: CSV import modifies victim-owned contact fields matched by email
+PASS: person importer records one successful update
+PASS: contact selected for deletion is also outside the actor individual scope
+PASS: real CSV validation accepts deletion row by matching the foreign contact email
+PASS: foreign contact delete row is accepted into a production importer batch
+PASS: CSV delete removes victim-owned contact #303 by email
+PASS: person importer records one successful deletion
+RESULT: 30 assertions passed; production Krayin CSV parser, AbstractImporter validation/batching, concrete importer/storage methods loaded. Framework, repositories and database are still test doubles.
