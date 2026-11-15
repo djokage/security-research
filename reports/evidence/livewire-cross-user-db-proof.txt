@@ -1,0 +1,52 @@
+=== Cross-user SQLite authorization test ===
+non-admin JSON modifies admin-owned record
+  initial_get_status=200
+  authenticated_session_user_id=1
+  target_record_owner_user_id=2
+  http_response_status=403
+  database_value=modified-by-member
+  database_changed_by_user_id=1
+non-admin ordinary action targets admin-owned record
+  initial_get_status=200
+  authenticated_session_user_id=1
+  target_record_owner_user_id=2
+  http_response_status=403
+  database_value=admin-owned-original
+  database_changed_by_user_id=null
+non-admin JSON with built-in Authorize targets admin-owned record
+  initial_get_status=200
+  authenticated_session_user_id=1
+  target_record_owner_user_id=2
+  http_response_status=403
+  database_value=admin-owned-original
+  database_changed_by_user_id=null
+admin JSON modifies admin-owned record
+  initial_get_status=200
+  authenticated_session_user_id=2
+  target_record_owner_user_id=2
+  http_response_status=200
+  database_value=modified-by-admin
+  database_changed_by_user_id=2
+non-admin JSON without CSRF
+  initial_get_status=200
+  authenticated_session_user_id=1
+  target_record_owner_user_id=2
+  http_response_status=419
+  database_value=admin-owned-original
+  database_changed_by_user_id=null
+
+CROSS-USER DATABASE PROOF PASSED
+sqlite_file=/app/storage/framework/testing/livewire-cross-user-db-proof.sqlite
+non_admin_user_id=1
+admin_user_id=2
+target_record_id=1
+The admin-owned record was changed by the authenticated non-admin only in the JSON/global-hook case.
+
+=== Persisted per-case evidence ===
+non-admin JSON modifies admin-owned record | actor=1 | owner=2 | HTTP=403 | value=modified-by-member | changed_by=1
+non-admin ordinary action targets admin-owned record | actor=1 | owner=2 | HTTP=403 | value=admin-owned-original | changed_by=
+non-admin JSON with inline Gate authorization | actor=1 | owner=2 | HTTP=403 | value=admin-owned-original | changed_by=
+non-admin JSON with built-in Authorize targets admin-owned record | actor=1 | owner=2 | HTTP=403 | value=admin-owned-original | changed_by=
+admin JSON modifies admin-owned record | actor=2 | owner=2 | HTTP=200 | value=modified-by-admin | changed_by=2
+non-admin JSON without CSRF | actor=1 | owner=2 | HTTP=419 | value=admin-owned-original | changed_by=
+Evidence is retained in the proof_results table of the SQLite file.

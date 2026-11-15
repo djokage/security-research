@@ -8,11 +8,12 @@ The reports include the affected code, reproduction details and observed impact.
 
 ### [Livewire: `#[Json]` methods run before global authorization hooks](reports/livewire-global-hook-authorization-order.md)
 
-A global `ComponentHook::call()` can reject a JSON action after its method has already run, allowing side effects despite an HTTP 403 response.
+A global `ComponentHook::call()` can reject a JSON action after its method has already run. The database-backed test also shows an authenticated non-admin modifying an administrator-owned record before the request returns HTTP 403.
 
 - Project: [livewire/livewire](https://github.com/livewire/livewire)
 - Area: PHP, Laravel, Livewire component authorization
 - Tested: Livewire 4.4.8, Laravel 13.42.0, PHP 8.4.24
+- Evidence: [Cross-user SQLite test output](reports/evidence/livewire-cross-user-db-proof.txt)
 
 ### [vhost-device-gpu: bad SUBMIT_3D fence count can crash the backend](reports/vhost-device-gpu-guest-dos.md)
 
