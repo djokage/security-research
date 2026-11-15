@@ -1,7 +1,5 @@
 # Security research
 
-I publish security issues found while reviewing open-source projects.
-
 The reports include the affected code, reproduction details and observed impact.
 
 ## Reports
