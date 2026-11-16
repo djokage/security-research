@@ -1,0 +1,47 @@
+[PASS] SQLite foreign-key enforcement is enabled
+[PASS] file-backed database contains the relevant Krayin tables
+[PASS] seed database passes SQLite integrity_check
+[PASS] actor is group-scoped
+[PASS] actor role includes user-creation permission
+[PASS] actor role includes lead-view permission
+[PASS] actor belongs only to Sales-A
+[PASS] submitted role_id passes exists:roles,id
+[PASS] submitted custom role is not a full-administrator role
+[PASS] role-assignment guard accepts a role whose permissions are a subset of the actor's
+[PASS] scope guard accepts group scope for a group-scoped actor
+[PASS] submitted group_id passes exists:groups,id
+[PASS] submitted group is outside the actor's own membership
+[PASS] created account is active (status=1)
+[PASS] created_by records the attacking manager
+[PASS] user_groups pivot now places the new account in Sales-B
+[PASS] new account password is known to the account creator and verifies as bcrypt
+[PASS] original manager's authorized user IDs remain [10]
+[PASS] new account's authorized user IDs include Sales-B member IDs [20, 30]
+[PASS] original Sales-A manager cannot read the Sales-B lead
+[PASS] new account can read the Sales-B lead through the normal lead-owner scope query
+[PASS] actor role includes the Lead edit ACL permission
+[PASS] actor role includes the Lead delete ACL permission
+[PASS] original actor fails the owner-ID authorization gate for a Sales-B record
+[PASS] new account passes the same owner-ID authorization gate for a Sales-B record
+[PASS] cross-group account updates a victim-group lead after passing the production owner-ID gate
+[PASS] cross-group account deletes a victim-group lead after passing the production owner-ID gate
+[PASS] control account in Sales-A does not inherit Sales-B user IDs
+[PASS] control account in Sales-A cannot read the Sales-B lead
+[PASS] control account in Sales-A fails the owner-ID gate for Sales-B updates/deletes
+[PASS] database foreign key rejects a group ID that does not exist
+
+=== database evidence ===
+Actor 10 groups: [1]
+New user 30 groups: [2]
+Authorized IDs for actor 10: [10]
+Authorized IDs for new user 30: [20, 30]
+Lead 902 visible to actor 10: []
+Lead 902 visible to new user 30 before modification: [(902, 'Victim group confidential lead')]
+Lead 902 title after cross-group update: 'Changed by cross-group provisioned account'
+Lead 903 exists after cross-group delete: None
+SQLite database: /mnt/data/krayin-group-scope-local.sqlite
+SQLite integrity_check: ok
+Foreign key violations: []
+
+RESULT: cross-group account provisioning, lead read access, lead update and lead deletion reproduced in a real local SQLite database.
+BOUNDARY: database-level reproduction with Krayin-derived schema and source-matched SQL; Laravel HTTP routing, middleware, Eloquent model hydration, and session login were not run.
