@@ -4,6 +4,17 @@ The reports include the affected code, reproduction details and observed impact.
 
 ## Reports
 
+### [Krayin CRM: group membership assignment is not restricted to the acting user's groups](reports/krayin-group-membership-scope-bypass.md)
+
+A delegated group-scoped user can assign a newly created account, or an eligible existing account, to a group outside the actor's own group memberships. The resulting account can gain access to leads owned by users in that group, subject to the account's role permissions.
+
+- Project: [krayin/laravel-crm](https://github.com/krayin/laravel-crm)
+- Version examined: Krayin CRM `v2.2.8`
+- Area: Admin user creation and update
+- Classification: CWE-862 — Missing Authorization
+- Evidence: 29-assertion source-method reproduction and 31-assertion SQLite reproduction
+- Reproducer: [group membership scope tests](reproducers/krayin-group-membership-scope/)
+
 ### [Krayin CRM: CSV imports bypass individual record ownership checks](reports/krayin-importer-ownership-scope-bypass.md)
 
 An authenticated account with individual record visibility and the Data Transfer import permissions can use CSV imports to modify and reassign another user's leads and contacts, and delete another user's contact.
