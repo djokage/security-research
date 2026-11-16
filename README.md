@@ -12,7 +12,7 @@ A delegated group-scoped user can assign a newly created account, or an eligible
 - Version examined: Krayin CRM `v2.2.8`
 - Area: Admin user creation and update
 - Classification: CWE-862 — Missing Authorization
-- Evidence: 29-assertion source-method reproduction and 31-assertion SQLite reproduction
+- Evidence: 31-assertion file-backed SQLite reproduction; separate 29-assertion source-method test is documented in the report
 - Reproducer: [group membership scope tests](reproducers/krayin-group-membership-scope/)
 
 ### [Krayin CRM: CSV imports bypass individual record ownership checks](reports/krayin-importer-ownership-scope-bypass.md)
