@@ -4,6 +4,16 @@ The reports include the affected code, reproduction details and observed impact.
 
 ## Reports
 
+### [Laravel Socialite: Google ID tokens are accepted without checking the OIDC nonce](reports/laravel-socialite-google-id-token-nonce-replay.md)
+
+The Google provider verifies a signed ID token but does not compare its `nonce` claim with the value stored for the login attempt. A 17-assertion Laravel HTTP/session reproduction accepted a token from one browser session in a separate session with a different nonce. The report documents the application conditions and the limits of the demonstrated attack.
+
+- Project: [laravel/socialite](https://github.com/laravel/socialite)
+- Version tested: `v5.32.0`
+- Area: Google ID-token authentication through `userFromToken()`
+- Evidence: [17-assertion HTTP/session test output](reports/evidence/socialite-google-nonce-17-assertions.txt)
+- Status: Privately reported to Laravel; maintainer review was pending at publication. No CVE is assigned.
+
 ### [Krayin CRM: group membership assignment is not restricted to the acting user's groups](reports/krayin-group-membership-scope-bypass.md)
 
 A delegated group-scoped user can assign a newly created account, or an eligible existing account, to a group outside the actor's own group memberships. The resulting account can gain access to leads owned by users in that group, subject to the account's role permissions.

@@ -1,0 +1,21 @@
+[PASS] real Socialite Google authorization URL carries the nonce stored in browser A's session
+[PASS] matching nonce authenticates through the Laravel HTTP route using the real GoogleProvider
+[PASS] independent Socialite login request creates a distinct browser B nonce
+[PASS] session B accepts session A's signed ID token although nonce A differs from nonce B
+[PASS] session B remains authenticated on a subsequent independent HTTP request
+[PASS] application-side nonce comparison rejects the cross-session replay
+[PASS] rejected secure replay does not leave an authenticated browser session
+[PASS] token without nonce is accepted and creates an authenticated session despite a fresh application nonce
+[PASS] session created from the nonce-less token remains authenticated on a subsequent request
+[PASS] negative control rejects invalid signature
+[PASS] rejected invalid signature token does not create an authenticated session
+[PASS] negative control rejects wrong audience
+[PASS] rejected wrong audience token does not create an authenticated session
+[PASS] negative control rejects wrong issuer
+[PASS] rejected wrong issuer token does not create an authenticated session
+[PASS] negative control rejects expired
+[PASS] rejected expired token does not create an authenticated session
+
+Assertions: 17
+Passed: 17
+Failed: 0
